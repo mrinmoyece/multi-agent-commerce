@@ -1,0 +1,56 @@
+spring:
+  application:
+    name: multi-agent-commerce
+  threads:
+    virtual:
+      enabled: true
+
+server:
+  port: 8080
+
+llm:
+  provider: ${LLM_PROVIDER:github_models}
+  chat-deployment: ${AZURE_CHAT_DEPLOYMENT:gpt-4o}
+
+azure:
+  openai:
+    endpoint: ${AZURE_OPENAI_ENDPOINT:}
+    key: ${AZURE_OPENAI_API_KEY:}
+
+github:
+  token: ${GITHUB_TOKEN:}
+
+retailer:
+  id: ${RETAILER_ID:default-retailer}
+
+briefing:
+  cron: ${BRIEFING_CRON:0 0 6 * * *}   # 06:00 daily — override via env var
+
+spring.task.execution:
+  pool:
+    core-size: 8
+    max-size: 32
+    queue-capacity: 200
+  thread-name-prefix: commerce-agent-
+
+spring.task.scheduling:
+  pool:
+    size: 2
+  thread-name-prefix: briefing-scheduler-
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      llm:
+        sliding-window-size: 5
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 60s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  metrics:
+    tags:
+      application: ${spring.application.name}

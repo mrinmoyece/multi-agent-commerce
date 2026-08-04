@@ -1,0 +1,6 @@
+briefing:
+  cron: "0 * * * * *"  # Every minute in dev — for fast iteration testing
+
+logging:
+  level:
+    com.agentforge: DEBUG
