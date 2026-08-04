@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multi-agent-commerce
+  labels:
+    app: multi-agent-commerce
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: multi-agent-commerce
+  template:
+    metadata:
+      labels:
+        app: multi-agent-commerce
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8080"
+    spec:
+      containers:
+        - name: multi-agent-commerce
+          image: your-registry/multi-agent-commerce:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "prod"
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: github-token
+            - name: AZURE_OPENAI_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: azure-openai-endpoint
+            - name: AZURE_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: azure-openai-api-key
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: multi-agent-commerce
+spec:
+  selector:
+    app: multi-agent-commerce
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
