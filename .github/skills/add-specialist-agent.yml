@@ -1,0 +1,50 @@
+# GitHub Copilot Skill: Add New Specialist Agent
+name: add-specialist-agent
+description: >
+  Add a new specialist agent to the multi-agent commerce platform.
+
+trigger:
+  - "add new agent"
+  - "add specialist"
+  - "add commerce agent"
+
+instructions: |
+  1. Create agent class implementing CommerceAgent:
+  ```java
+  @Component("myNewAgent")
+  @RequiredArgsConstructor
+  @Slf4j
+  public class MyNewAgent implements CommerceAgent {
+      private final OpenAIClient openAIClient;
+      
+      @Override
+      public String getName() { return "MyNewAgent"; }
+      
+      @Override
+      public AgentMessage analyse(DailyAnalysisContext ctx) {
+          // 1. Fetch domain data
+          // 2. Call LLM for interpretation (temperature 0.4)
+          // 3. Return AgentMessage with FINDINGS type
+          return AgentMessage.builder()
+              .agentName(getName())
+              .messageType(MessageType.FINDINGS)
+              .content(llmFindings)
+              .timestamp(Instant.now())
+              .build();
+      }
+  }
+  ```
+  
+  2. Add to AgentCoordinator parallel block:
+  ```java
+  CompletableFuture<AgentMessage> myAgentFuture = CompletableFuture.supplyAsync(
+      () -> myNewAgent.analyse(ctx), agentExecutor);
+  CompletableFuture.allOf(...existingFutures..., myAgentFuture).join();
+  ```
+  
+  3. Add findings to synthesis prompt in buildSynthesisPrompt().
+  
+  4. Write unit test — mock LLM response, verify AgentMessage fields.
+  
+  Rule: If agent throws, coordinator must continue with remaining agents.
+  Add try/catch in coordinator that logs warning and returns empty AgentMessage.
