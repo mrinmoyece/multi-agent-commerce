@@ -4,7 +4,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-orange)](https://openjdk.org/projects/jdk/21/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.4.6-brightgreen)](https://spring.io/projects/spring-boot)
-[![Multi-Agent](https://img.shields.io/badge/Architecture-Multi--Agent-purple)](https://github.com/YOUR-HANDLE/multi-agent-commerce)
+[![Multi-Agent](https://img.shields.io/badge/Architecture-Multi--Agent-purple)](https://github.com/mrinmoyece/multi-agent-commerce)
 
 ## Architecture — Multi-Agent Orchestration
 
