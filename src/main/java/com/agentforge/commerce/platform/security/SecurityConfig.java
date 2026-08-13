@@ -46,6 +46,13 @@ public class SecurityConfig {
         JwtAuthConverter jwtAuthConverter = new JwtAuthConverter(securityProperties.getRolesClaim());
 
         http
+                // CSRF protection is intentionally disabled: this is a stateless
+                // resource server authenticated solely via `Authorization: Bearer`
+                // JWTs (no cookies, no HTTP session — see STATELESS below). Browsers
+                // never auto-attach bearer tokens cross-site, so there is no CSRF
+                // attack surface; enabling CSRF here would only break legitimate API
+                // clients. (CodeQL java/spring-disabled-csrf-protection is a false
+                // positive for token-only APIs.)
                 .csrf(AbstractHttpConfigurer::disable)
                 .cors(Customizer.withDefaults())
                 .sessionManagement(session ->
