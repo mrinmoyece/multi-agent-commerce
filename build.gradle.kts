@@ -41,7 +41,7 @@ extra["netty.version"] = "4.1.136.Final"      // CVE-2026-55831/55833/56745/5681
 extra["postgresql.version"] = "42.7.12"        // CVE-2026-54291
 
 val testcontainersVersion = "1.20.6"
-val wiremockVersion = "3.9.2"
+val wiremockVersion = "3.13.2"
 
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-web")
