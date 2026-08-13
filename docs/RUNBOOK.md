@@ -7,10 +7,30 @@ Required:
 - `LLM_PROVIDER`: `github-models` or `azure-openai`
 - `LLM_API_KEY`: provider credential
 - `AZURE_OPENAI_ENDPOINT`: required for Azure OpenAI
+- `SPRING_DATASOURCE_URL` / `SPRING_DATASOURCE_USERNAME` / `SPRING_DATASOURCE_PASSWORD`:
+  PostgreSQL connection (no defaults in the base profile)
+- `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI` and
+  `PLATFORM_SECURITY_AUDIENCES`: OIDC issuer and accepted audience(s); the app
+  refuses to start without a decoder in non-test profiles
+
+Coordination:
+
+- `PLATFORM_REDIS_ENABLED` (default `true`): when `true`, `SPRING_DATA_REDIS_HOST`
+  (and optionally `_PORT`, `_PASSWORD`, `_SSL`) must point at a reachable Redis
+  or startup fails fast. The `dev`/`test` profiles may set it `false` to use
+  in-memory single-JVM coordination.
 
 Optional controls include `LLM_TIMEOUT`, `LLM_MAX_RESPONSE_CHARACTERS`,
-`AZURE_CHAT_DEPLOYMENT`, `RETAILER_ID`, `BRIEFING_CRON`, and
-`MANAGEMENT_PORT`.
+`AZURE_CHAT_DEPLOYMENT`, `RETAILER_ID`, `BRIEFING_CRON`, `MANAGEMENT_PORT`, and
+the `PLATFORM_*` tunables (lock TTL, status-cache TTL, orchestration timeout/pool,
+rate-limit window/limit).
+
+## Database migrations
+
+Schema is owned by Flyway (`src/main/resources/db/migration`). Migrations run
+automatically on startup in every non-test profile (`ddl-auto=none`). Review new
+migrations before promotion; never edit an applied migration in place. Tests
+build the schema from the JPA model on H2 and keep it in step with the DDL.
 
 ## Health and telemetry
 
@@ -37,8 +57,19 @@ and redeploy a known-good digest. For malformed briefings, inspect schema
 validation failures and provider status; never bypass validation to restore
 service.
 
+## Scaling and secrets
+
+The Deployment runs multiple replicas behind a rolling update. Duplicate work is
+prevented by the durable run's unique idempotency key plus a Redis lock, so
+scaling is horizontal and safe. Provision `multi-agent-commerce-secrets`
+(datasource URL/username/password, Redis password) and
+`multi-agent-commerce-config` (Redis host/port/ssl, OAuth issuer and audiences)
+from your secret manager before rollout — the manifests reference them and ship
+no default passwords.
+
 ## Rollback
 
-Redeploy the last known-good image digest and configuration. The service is
-stateless, so rollback does not require data migration. Confirm that only one
-pod is running and that the management endpoint reports ready.
+Redeploy the last known-good image digest and configuration. Run state lives in
+PostgreSQL, so application rollback needs no data migration; only ever roll the
+database forward via Flyway. Confirm the pods report ready and one durable run
+per retailer/date is created.

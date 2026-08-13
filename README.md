@@ -92,9 +92,11 @@ in outerwear.
 | Framework | Spring Boot 3.5.16, Java 21 LTS |
 | Concurrency | Java 21 virtual threads (`spring.threads.virtual.enabled=true`) for request handling; a dedicated `commerce-agent-` task executor (configured under `spring.task.execution` in `application.yml`) for parallel agent dispatch |
 | LLM | Azure OpenAI GPT-4o, or GitHub Models (configurable via `llm.provider`) |
-| Data | Synthetic in-memory data (see below) — no external database |
+| Data | PostgreSQL (Flyway + Spring Data JPA) for durable runs, results, approvals, audit events, and idempotency keys; agent *inputs* remain synthetic/LLM-extrapolated (see below) |
+| Coordination | Redis distributed lock, run-status cache, and rate limiting (in-memory stand-ins under `dev`/`test`) |
+| API & security | Versioned REST API under `/api/v1`; OAuth2/OIDC JWT resource server with scope/role method security and RFC 9457 Problem Details |
 | Resilience | Resilience4j circuit breaker + retry, 30-second transport timeout, bounded LLM responses |
-| Scheduling | Spring `@Scheduled` (`AgentCoordinator.scheduledDailyAnalysis`), cron driven by `briefing.cron` (default `0 0 6 * * *` — 06:00 daily) |
+| Scheduling | `DailyAnalysisScheduler` creates one durable run per retailer/date (cron `briefing.cron`, default `0 0 6 * * *`); it is executed exactly once across replicas via a Redis lock + optimistic-locking state machine |
 | Observability | Micrometer + Prometheus on the internal management port (`8081`), structured JSON logging |
 | Supply chain | Dependency locks/checksums, CycloneDX SBOM, Trivy, pinned Actions and container bases |
 
@@ -105,8 +107,16 @@ This is a portfolio/demo project — it intentionally has no external data depen
 - **InventoryAgent** reads from `InventoryDataTool`, which returns a **hardcoded, deterministic synthetic dataset** of 20 SKUs (no warehouse/ERP system is connected). The Resilience4j circuit breaker and retry annotations on the tool model what a production WMS integration would look like, but today there's no live external call behind them — the "circuit" never has a reason to open.
 - **PricingAgent** does **not** call any real competitor-pricing or market-data feed. It asks the LLM to extrapolate "competitor undercutting" risk, margin impact, and seasonal pricing opportunities from just the current date and a retailer ID. This is useful for demonstrating prompt design and agent orchestration, but the pricing analysis is **LLM-extrapolated narrative, not data-backed**. Treat its output as illustrative, not decision-grade.
 - **SentimentAgent** similarly does not ingest real reviews, support tickets, or social mentions. It asks the LLM to generate plausible sentiment themes from the date and retailer ID alone.
-- **No persistence layer.** There is no MongoDB, Elasticsearch, Postgres, or any other datastore in this project — all data is generated in memory per request.
-- **No REST API.** There is currently no controller exposing an HTTP endpoint to trigger analysis on demand. The only entry point is the `@Scheduled` job in `AgentCoordinator`. The empty `api` package is a placeholder for a future on-demand trigger endpoint.
+- **Durable persistence is in place.** Analysis runs, per-agent results, approval
+  records, audit events, and idempotency keys are stored in PostgreSQL via Flyway
+  migrations and Spring Data JPA. What remains synthetic is the *agent input*
+  above, not the platform's run state. Credentials and raw provider payloads are
+  never persisted.
+- **A versioned REST API is available** under `/api/v1` (create runs, get
+  status/results, list runs with pagination, list and approve/reject approvals),
+  secured by an OAuth2/OIDC JWT resource server. The `@Scheduled`
+  `DailyAnalysisScheduler` remains the automated entry point and now creates a
+  durable run executed exactly once across replicas.
 
 In a production version, `InventoryDataTool` would be backed by a real WMS/ERP integration, `PricingAgent` would call a competitor pricing API, and `SentimentAgent` would query a reviews/support-ticket store — at which point the existing Resilience4j circuit breakers and retries would be protecting genuine external calls instead of in-memory data generation.
 
@@ -125,7 +135,21 @@ export LLM_API_KEY=your-github-token
 ./gradlew bootRun
 ```
 
-The daily briefing runs automatically on the schedule defined by `briefing.cron` (default `0 0 6 * * *`, i.e. 06:00 daily — see `application.yml`). In the `dev` profile (`application-dev.yml`), it's overridden to run every minute for fast local iteration. There is currently no on-demand HTTP trigger; to run an ad-hoc analysis locally, call `AgentCoordinator.runDailyAnalysis(...)` directly (e.g. from a test or a temporary `CommandLineRunner`).
+The daily briefing runs automatically on the schedule defined by `briefing.cron`
+(default `0 0 6 * * *`, i.e. 06:00 daily — see `application.yml`). In the `dev`
+profile (`application-dev.yml`), it's overridden to run every minute for fast
+local iteration. You can also trigger an analysis on demand through the REST API
+(`POST /api/v1/analysis-runs` with a bearer JWT).
+
+### Running with PostgreSQL and Redis
+
+The base profile requires PostgreSQL and (unless `PLATFORM_REDIS_ENABLED=false`)
+Redis. `docker-compose up` starts both alongside the app with the connection
+settings wired in. For a pure local run without external infrastructure, use the
+`dev` profile, which disables Redis coordination and points at a local database.
+Production configuration (datasource, Redis, OAuth issuer/audience) is supplied
+via environment variables / Kubernetes Secret and ConfigMap — see the
+[runbook](docs/RUNBOOK.md).
 
 ### Running tests
 
@@ -141,9 +165,9 @@ the runtime image, and runs CodeQL.
 
 - Application traffic uses port `8080`; health and metrics use the internal
   management port `8081`.
-- The production manifest runs one replica because scheduling is process-local.
-  Scaling out before introducing distributed scheduling would create duplicate
-  daily briefings.
+- The production manifest runs multiple replicas behind a rolling update.
+  Duplicate daily briefings are prevented by a durable per-retailer/date
+  idempotency key plus a Redis lock, so the workload scales horizontally.
 - Containers run as UID `10001`, without Linux capabilities or service-account
   credentials, with a read-only root filesystem in Kubernetes.
 - LLM output is bounded and validated. Coordinator synthesis fails closed if it

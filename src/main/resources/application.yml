@@ -4,6 +4,33 @@ spring:
   threads:
     virtual:
       enabled: true
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:}
+    username: ${SPRING_DATASOURCE_USERNAME:}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+      minimum-idle: ${DB_POOL_MIN_IDLE:2}
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+    properties:
+      hibernate.jdbc.time_zone: UTC
+  flyway:
+    enabled: true
+    baseline-on-migrate: false
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      password: ${SPRING_DATA_REDIS_PASSWORD:}
+      ssl:
+        enabled: ${SPRING_DATA_REDIS_SSL:false}
+      timeout: ${SPRING_DATA_REDIS_TIMEOUT:2s}
+  mvc:
+    problemdetails:
+      enabled: true
 
 server:
   port: 8080
@@ -19,6 +46,29 @@ llm:
 
 retailer:
   id: ${RETAILER_ID:default-retailer}
+
+# Platform foundations: distributed coordination + resource-server security.
+# Production posture is fail-closed — Redis is required by default and the
+# OAuth2 issuer/audience MUST be provided via environment variables
+# (SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI, PLATFORM_SECURITY_AUDIENCES).
+# In-memory coordination stand-ins are only enabled under the dev/test profiles.
+platform:
+  redis-enabled: ${PLATFORM_REDIS_ENABLED:true}
+  lock:
+    ttl: ${PLATFORM_LOCK_TTL:5m}
+  status-cache:
+    ttl: ${PLATFORM_STATUS_CACHE_TTL:30s}
+  orchestration:
+    timeout: ${PLATFORM_ORCHESTRATION_TIMEOUT:2m}
+    pool-size: ${PLATFORM_ORCHESTRATION_POOL_SIZE:4}
+    queue-capacity: ${PLATFORM_ORCHESTRATION_QUEUE_CAPACITY:32}
+  rate-limit:
+    enabled: ${PLATFORM_RATE_LIMIT_ENABLED:true}
+    limit: ${PLATFORM_RATE_LIMIT:120}
+    window: ${PLATFORM_RATE_LIMIT_WINDOW:1m}
+  security:
+    audiences: ${PLATFORM_SECURITY_AUDIENCES:}
+    roles-claim: ${PLATFORM_SECURITY_ROLES_CLAIM:roles}
 
 briefing:
   cron: ${BRIEFING_CRON:0 0 6 * * *}   # 06:00 daily — override via env var

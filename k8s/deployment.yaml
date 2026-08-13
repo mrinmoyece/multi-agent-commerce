@@ -5,11 +5,15 @@ metadata:
   labels:
     app: multi-agent-commerce
 spec:
-  # Scheduling and state are process-local. Keep this singleton until a
-  # distributed scheduler and persistent briefing store are introduced.
-  replicas: 1
+  # Distributed coordination (Redis locks + durable Postgres run store) means a
+  # scheduled run is created once and executed exactly once across replicas, so
+  # the app is now safe to run as a horizontally-scaled, rolling-updated Deployment.
+  replicas: 2
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: multi-agent-commerce
@@ -61,6 +65,59 @@ spec:
                 secretKeyRef:
                   name: multi-agent-commerce-secrets
                   key: azure-openai-endpoint
+            # ── Persistence (PostgreSQL) ──────────────────────────────────
+            # Connection details come from an externally-managed Secret; no
+            # credentials are baked into this manifest or the image.
+            - name: SPRING_DATASOURCE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: datasource-url
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: datasource-username
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: datasource-password
+            # ── Coordination (Redis) ──────────────────────────────────────
+            - name: PLATFORM_REDIS_ENABLED
+              value: "true"
+            - name: SPRING_DATA_REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: multi-agent-commerce-config
+                  key: redis-host
+            - name: SPRING_DATA_REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: multi-agent-commerce-config
+                  key: redis-port
+            - name: SPRING_DATA_REDIS_SSL
+              valueFrom:
+                configMapKeyRef:
+                  name: multi-agent-commerce-config
+                  key: redis-ssl
+            - name: SPRING_DATA_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: redis-password
+            # ── OAuth2 resource server ────────────────────────────────────
+            # Issuer + audience are non-secret and live in the ConfigMap.
+            - name: SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
+              valueFrom:
+                configMapKeyRef:
+                  name: multi-agent-commerce-config
+                  key: oauth2-issuer-uri
+            - name: PLATFORM_SECURITY_AUDIENCES
+              valueFrom:
+                configMapKeyRef:
+                  name: multi-agent-commerce-config
+                  key: oauth2-audiences
           startupProbe:
             httpGet:
               path: /actuator/health/readiness
@@ -132,6 +189,14 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # PostgreSQL and Redis are reached in-cluster; allow just those ports.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 6379
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -153,3 +218,20 @@ spec:
   selector:
     matchLabels:
       app: multi-agent-commerce
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multi-agent-commerce-config
+  labels:
+    app: multi-agent-commerce
+# Non-secret runtime configuration. Connection secrets (datasource URL/username/
+# password, redis password, LLM key, Azure endpoint) live in the externally
+# managed Secret `multi-agent-commerce-secrets` and are NEVER committed here.
+data:
+  redis-host: "redis.commerce.svc.cluster.local"
+  redis-port: "6379"
+  redis-ssl: "false"
+  # Replace with the real OIDC issuer and the API's accepted audience(s).
+  oauth2-issuer-uri: "https://login.example.com/tenant"
+  oauth2-audiences: "api://multi-agent-commerce"

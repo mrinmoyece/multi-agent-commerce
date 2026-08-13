@@ -12,16 +12,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Coordinator Agent — the "manager" of the multi-agent system.
@@ -35,8 +36,9 @@ import java.util.concurrent.Executor;
  * The coordinator does NOT implement domain logic — only orchestrates and synthesises.
  * Domain logic lives in each specialist agent.
  *
- * Scheduling: runs at 06:00 daily (configurable via briefing.cron).
- * There is currently no on-demand HTTP trigger — see README "Simulated Data & Current Limitations".
+ * Durable, once-only scheduling across replicas is owned by the platform run
+ * executor, which drives this coordinator via {@link #orchestrate}. The legacy
+ * {@link #runDailyAnalysis} entry point is retained for direct, in-process use.
  */
 @Component
 @RequiredArgsConstructor
@@ -59,26 +61,40 @@ public class AgentCoordinator {
     @Qualifier("applicationTaskExecutor")
     private final Executor applicationTaskExecutor;
 
-    @Value("${retailer.id:default-retailer}")
-    private String retailerId;
-
-    // ── Scheduled entry point ────────────────────────────────────────────────
-
-    /** Runs at 06:00 daily. Override via {@code briefing.cron} in application.yml. */
-    @Scheduled(cron = "${briefing.cron:0 0 6 * * *}")
-    public void scheduledDailyAnalysis() {
-        runDailyAnalysis(DailyAnalysisContext.builder()
-                .date(LocalDate.now())
-                .retailerId(retailerId)
-                .build());
-    }
-
     // ── Core orchestration ───────────────────────────────────────────────────
 
     public CompletableFuture<DailyBriefing> runDailyAnalysis(DailyAnalysisContext context) {
         log.info("Coordinator: starting daily analysis — retailer={} date={}",
                 context.getRetailerId(), context.getDate());
+        try {
+            OrchestrationResult result = orchestrateInternal(context, null);
+            return CompletableFuture.completedFuture(result.briefing());
+        } catch (RuntimeException e) {
+            if (e.getCause() instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            log.error("Coordinator daily analysis failed ({})", e.getClass().getSimpleName());
+            throw new DailyAnalysisException("Daily analysis failed for retailer "
+                    + context.getRetailerId() + " on " + context.getDate(), e);
+        }
+    }
 
+    /**
+     * Durable-execution entry point. Runs the specialist agents (bounded by
+     * {@code timeout}), synthesises the briefing, and returns both the briefing
+     * and the individual agent messages so the caller can persist per-agent
+     * results. Agent behaviour and fail-closed synthesis are identical to
+     * {@link #runDailyAnalysis}.
+     *
+     * @param context the run context
+     * @param timeout hard ceiling on the parallel agent phase (never {@code null})
+     * @return the synthesised briefing plus each agent's message
+     */
+    public OrchestrationResult orchestrate(DailyAnalysisContext context, Duration timeout) {
+        return orchestrateInternal(context, timeout);
+    }
+
+    private OrchestrationResult orchestrateInternal(DailyAnalysisContext context, Duration timeout) {
         // PHASE 1: All specialist agents run in PARALLEL, dispatched on the tuned
         // "commerce-agent-" pool (application.yml: spring.task.execution) rather than
         // the JVM's default common pool.
@@ -89,35 +105,46 @@ public class AgentCoordinator {
         CompletableFuture<AgentMessage> sentimentFuture = CompletableFuture
                 .supplyAsync(() -> safeAnalyse(sentimentAgent, context), applicationTaskExecutor);
 
+        AgentMessage inventory;
+        AgentMessage pricing;
+        AgentMessage sentiment;
         try {
-            // allOf(...).join() already blocks until every future has completed (or
-            // throws on the first failure), so the .get() calls below are reading
-            // already-completed futures — they are not a second wait.
-            CompletableFuture.allOf(inventoryFuture, pricingFuture, sentimentFuture).join();
-
-            AgentMessage inventory = inventoryFuture.get();
-            AgentMessage pricing   = pricingFuture.get();
-            AgentMessage sentiment = sentimentFuture.get();
-
-            log.info("All agents reported — synthesising briefing");
-
-            // PHASE 2: LLM synthesises cross-agent insights
-            DailyBriefing briefing = synthesise(context, inventory, pricing, sentiment);
-
-            log.info("Daily briefing ready — {} actions, {} alerts",
-                    briefing.getRecommendedActions() != null ? briefing.getRecommendedActions().size() : 0,
-                    briefing.getUrgentAlerts()       != null ? briefing.getUrgentAlerts().size()       : 0);
-
-            return CompletableFuture.completedFuture(briefing);
-
-        } catch (Exception e) {
-            if (e instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
+            CompletableFuture<Void> all =
+                    CompletableFuture.allOf(inventoryFuture, pricingFuture, sentimentFuture);
+            if (timeout == null) {
+                all.join();
+            } else {
+                all.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             }
-            log.error("Coordinator daily analysis failed ({})", e.getClass().getSimpleName());
-            throw new DailyAnalysisException("Daily analysis failed for retailer "
-                    + context.getRetailerId() + " on " + context.getDate(), e);
+            inventory = inventoryFuture.get();
+            pricing   = pricingFuture.get();
+            sentiment = sentimentFuture.get();
+        } catch (TimeoutException e) {
+            inventoryFuture.cancel(true);
+            pricingFuture.cancel(true);
+            sentimentFuture.cancel(true);
+            throw new DailyAnalysisException("Agent orchestration timed out after " + timeout, e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new DailyAnalysisException("Agent orchestration was interrupted", e);
+        } catch (ExecutionException e) {
+            throw new DailyAnalysisException("Agent orchestration failed", e);
         }
+
+        log.info("All agents reported — synthesising briefing");
+
+        // PHASE 2: LLM synthesises cross-agent insights (fail-closed on invalid schema).
+        DailyBriefing briefing = synthesise(context, inventory, pricing, sentiment);
+
+        log.info("Daily briefing ready — {} actions, {} alerts",
+                briefing.getRecommendedActions() != null ? briefing.getRecommendedActions().size() : 0,
+                briefing.getUrgentAlerts()       != null ? briefing.getUrgentAlerts().size()       : 0);
+
+        return new OrchestrationResult(briefing, List.of(inventory, pricing, sentiment));
+    }
+
+    /** Briefing plus the individual agent messages that produced it. */
+    public record OrchestrationResult(DailyBriefing briefing, List<AgentMessage> agentMessages) {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

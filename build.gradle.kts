@@ -33,12 +33,28 @@ val azureOpenAiVersion = "1.0.0-beta.16"
 val resilience4jVersion = "2.4.0"
 extra["commons-lang3.version"] = "3.20.0"
 
+val testcontainersVersion = "1.20.6"
+
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-webflux")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springframework.boot:spring-boot-starter-aop")
+    implementation("org.springframework.boot:spring-boot-starter-validation")
     annotationProcessor("org.springframework.boot:spring-boot-configuration-processor")
+
+    // ── Security: OAuth2/OIDC JWT resource server ──
+    implementation("org.springframework.boot:spring-boot-starter-security")
+    implementation("org.springframework.boot:spring-boot-starter-oauth2-resource-server")
+
+    // ── Persistence: PostgreSQL + Flyway + JPA ──
+    implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+    implementation("org.flywaydb:flyway-core")
+    implementation("org.flywaydb:flyway-database-postgresql")
+    runtimeOnly("org.postgresql:postgresql")
+
+    // ── Distributed coordination / cache: Redis ──
+    implementation("org.springframework.boot:spring-boot-starter-data-redis")
 
     implementation("com.azure:azure-ai-openai:$azureOpenAiVersion")
 
@@ -55,7 +71,14 @@ dependencies {
     annotationProcessor("org.projectlombok:lombok")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.security:spring-security-test")
     testImplementation("org.mockito:mockito-core")
+    testRuntimeOnly("com.h2database:h2")
+
+    // ── Optional real-infrastructure integration tests (skipped when Docker is absent) ──
+    testImplementation("org.springframework.boot:spring-boot-testcontainers")
+    testImplementation("org.testcontainers:junit-jupiter:$testcontainersVersion")
+    testImplementation("org.testcontainers:postgresql:$testcontainersVersion")
 }
 
 tasks.withType<Test> {
@@ -123,6 +146,18 @@ tasks.check {
 
 dependencyLocking {
     lockAllConfigurations()
+}
+
+tasks.register("resolveAndLockAll") {
+    notCompatibleWithConfigurationCache("Resolves all configurations at execution time")
+    doFirst {
+        require(gradle.startParameter.isWriteDependencyLocks) {
+            "Run with --write-locks to regenerate dependency locks"
+        }
+    }
+    doLast {
+        configurations.filter { it.isCanBeResolved }.forEach { it.resolve() }
+    }
 }
 
 tasks.withType<AbstractArchiveTask>().configureEach {
