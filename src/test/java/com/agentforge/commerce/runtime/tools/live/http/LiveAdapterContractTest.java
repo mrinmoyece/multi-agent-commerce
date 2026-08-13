@@ -75,7 +75,10 @@ class LiveAdapterContractTest {
         e.setPath(path);
         e.setAllowedHosts(List.of("localhost"));
         e.setConnectTimeout(Duration.ofSeconds(2));
-        e.setReadTimeout(Duration.ofMillis(500));
+        // Generous default so slow/loaded CI runners never spuriously time out on a
+        // localhost round trip; the timeout path is exercised explicitly by
+        // readTimeoutIsMapped() with its own tight budget against a fixed delay.
+        e.setReadTimeout(Duration.ofSeconds(5));
         e.setMaxResponseBytes(64 * 1024);
         e.setPageSize(2);
         e.setMaxPages(5);
@@ -203,7 +206,11 @@ class LiveAdapterContractTest {
                 .willReturn(aResponse().withFixedDelay(1500)
                         .withBody(inventoryPage(NOW.toString(), false, "SKU-1"))));
 
-        assertKind(AdapterException.Kind.TIMEOUT, endpoint(INVENTORY_PATH));
+        Endpoint endpoint = endpoint(INVENTORY_PATH);
+        // Tight per-request budget well below the server's fixed delay so the
+        // timeout fires deterministically regardless of runner speed.
+        endpoint.setReadTimeout(Duration.ofMillis(300));
+        assertKind(AdapterException.Kind.TIMEOUT, endpoint);
     }
 
     @Test
