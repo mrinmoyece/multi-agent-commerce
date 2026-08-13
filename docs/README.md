@@ -1,5 +1,6 @@
 # Documentation
 
+- [Local development](LOCAL_DEVELOPMENT.md) - canonical local setup: prerequisites, `.env`, `docker compose`, readiness, JWT, and API walkthrough
 - [Architecture](ARCHITECTURE.md) - components, execution flow, and invariants
 - [Security model](SECURITY_MODEL.md) - assets, trust boundaries, threats, and controls
 - [Runbook](RUNBOOK.md) - deploy, health, observability, alert response, backup/DR, rollback

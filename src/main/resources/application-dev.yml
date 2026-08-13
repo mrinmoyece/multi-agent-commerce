@@ -1,9 +1,9 @@
 briefing:
   cron: "0 * * * * *"  # Every minute in dev — for fast iteration testing
 
-# Dev profile: safe local defaults for iteration against docker-compose infra.
+# Dev profile: safe local defaults for iteration against Docker Compose infra.
 # Coordination runs in-memory (single JVM) so a local Redis is optional. Point
-# at the docker-compose Postgres. Security still validates real JWTs — set
+# at the Docker Compose Postgres. Security still validates real JWTs — set
 # SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI and PLATFORM_SECURITY_AUDIENCES
 # to a dev identity provider before starting.
 spring:

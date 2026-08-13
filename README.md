@@ -159,6 +159,11 @@ digest. See the [ADRs](docs/adr/README.md), [governance](docs/governance/README.
 
 ## Quick Start
 
+> **New to the project?** The [Local development guide](docs/LOCAL_DEVELOPMENT.md)
+> is the canonical, end-to-end walkthrough: prerequisites, `.env` setup, `docker
+> compose up --build`, readiness checks, obtaining a bearer JWT, and triggering a
+> run with copy-pasteable (sanitized) `curl` examples.
+
 This is a Gradle project (no Maven). The Gradle wrapper is included, so you don't need Gradle installed locally.
 
 ```bash
@@ -181,9 +186,11 @@ local iteration. You can also trigger an analysis on demand through the REST API
 ### Running with PostgreSQL and Redis
 
 The base profile requires PostgreSQL and (unless `PLATFORM_REDIS_ENABLED=false`)
-Redis. `docker-compose up` starts both alongside the app with the connection
-settings wired in. For a pure local run without external infrastructure, use the
-`dev` profile, which disables Redis coordination and points at a local database.
+Redis. `docker compose up` starts both alongside the app with the connection
+settings wired in (see the [Local development guide](docs/LOCAL_DEVELOPMENT.md)
+for the full workflow). For a pure local run without external infrastructure, use
+the `dev` profile, which disables Redis coordination and points at a local
+database.
 Production configuration (datasource, Redis, OAuth issuer/audience) is supplied
 via environment variables / Kubernetes Secret and ConfigMap — see the
 [runbook](docs/RUNBOOK.md).

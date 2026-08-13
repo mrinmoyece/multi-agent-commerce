@@ -1,4 +1,4 @@
-# Prometheus alert rules for local / docker-compose observability. In Kubernetes the
+# Prometheus alert rules for local / Docker Compose observability. In Kubernetes the
 # same rules ship as a PrometheusRule CR (see k8s/base/prometheusrule.yaml) loaded by
 # the Prometheus Operator. Keep the two in sync. Every alert links to a runbook anchor.
 groups:
