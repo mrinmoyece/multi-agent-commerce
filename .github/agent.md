@@ -69,3 +69,53 @@ There is no HTTP trigger in the current application.
 - [ ] New agent findings included in synthesis prompt
 - [ ] Unit test mocks LLM and verifies agent message structure
 - [ ] Coordinator test verifies synthesis runs even when one agent fails
+
+## Layer 2 — Agent runtime & evaluation (authoritative for new work)
+
+The runtime under `com.agentforge.commerce.runtime.*` is now the contract layer.
+When touching agent behaviour, work through it — do not hand a bare model string
+anywhere.
+
+- **Never present ungrounded output.** Specialists must fetch a grounded
+  `ToolResult` (via a `GroundedTool`) and return an `AgentResultEnvelope` whose
+  `Evidence`/`Citation` back every claim. Fixture/simulated sources are
+  non-authoritative and must stay `DEGRADED`; never label them live.
+- **Fence untrusted data.** All tool payloads and model-derived text pass through
+  `BoundaryEncoder` before entering a prompt. Never interpolate raw tool data.
+- **Validate and fail closed.** Every specialist/coordinator output is validated
+  against its strict schema (`runtime.validation.AgentSchemas`); on failure,
+  return the deterministic degraded fallback — never throw a raw model error or
+  present invalid output.
+- **Respect budgets and brakes.** Budget reservation is a hard stop *before* the
+  provider call. Do not add tool calls, agent rounds or provider calls that
+  bypass `BudgetLedger`/`RunBrakes`. No arbitrary code execution, no unrestricted
+  URL fetches.
+- **Memory is evidence-only.** Only write validated, provenance-matched,
+  deduplicated facts to `SemanticMemoryStore`, always scoped by `retailerId`.
+  Never memorise raw free-form model output.
+- **Prompts are versioned.** Add/change prompts through `PromptRegistry`; the
+  prompt id + content hash are persisted on the run/envelope.
+- **Telemetry carries no secrets.** Add spans/metrics via `RuntimeTelemetry`
+  only; never record prompts, payloads or credentials.
+- **Human-in-the-loop.** High-impact actions (pricing changes, emergency orders,
+  low-confidence recommendations) must route through `RiskPolicy` + Layer 1
+  approvals and resume deterministically.
+
+### Evaluation gate (must stay green)
+
+Any change to runtime behaviour must keep the offline eval gate green:
+
+- Run `./gradlew evalSmoke` locally for a fast signal, `./gradlew evalGate` for
+  the full gate (also part of `check` and CI).
+- Golden scenarios live in `com.agentforge.commerce.eval.EvalHarness`; the
+  committed baseline is `eval/baseline/eval-report.json`.
+- The report is deterministic — an intended behavioural change requires
+  regenerating the baseline with `./gradlew evalGate -PevalUpdateBaseline` in the
+  same PR, so reviewers see the metric diff. Never weaken a threshold to pass.
+
+### Layer 2 PR Standards
+- [ ] New behaviour returns a grounded, schema-valid `AgentResultEnvelope`
+- [ ] Untrusted data fenced; budgets/brakes respected; no new unbounded calls
+- [ ] Memory writes are evidence-backed and retailer-scoped
+- [ ] `./gradlew clean check` (incl. `evalGate`) and `cyclonedxBom` pass
+- [ ] Eval baseline regenerated in-PR if behaviour intentionally changed

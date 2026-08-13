@@ -72,6 +72,42 @@ public class AnalysisRunEntity {
     @Column(name = "failure_reason", length = 2000)
     private String failureReason;
 
+    @Column(name = "prompt_id", length = 128)
+    private String promptId;
+
+    @Column(name = "prompt_hash", length = 64)
+    private String promptHash;
+
+    @Column(name = "provider", length = 64)
+    private String provider;
+
+    @Column(name = "model", length = 64)
+    private String model;
+
+    @Column(name = "prompt_tokens")
+    private long promptTokens;
+
+    @Column(name = "completion_tokens")
+    private long completionTokens;
+
+    @Column(name = "cost_micros")
+    private long costMicros;
+
+    @Column(name = "tool_calls")
+    private int toolCalls;
+
+    @Column(name = "agent_rounds")
+    private int agentRounds;
+
+    @Column(name = "min_confidence")
+    private double minConfidence;
+
+    @Column(name = "degraded", nullable = false)
+    private boolean degraded;
+
+    @Column(name = "risk_reasons", length = 2000)
+    private String riskReasons;
+
     @Version
     @Column(nullable = false)
     private long version;

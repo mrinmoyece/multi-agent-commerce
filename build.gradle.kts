@@ -67,6 +67,10 @@ dependencies {
     implementation("net.logstash.logback:logstash-logback-encoder:9.0")
     implementation("io.micrometer:micrometer-registry-prometheus")
 
+    // ── Observability: OpenTelemetry tracing via the Micrometer bridge ──
+    implementation("io.micrometer:micrometer-tracing-bridge-otel")
+    implementation("io.opentelemetry:opentelemetry-exporter-otlp")
+
     compileOnly("org.projectlombok:lombok")
     annotationProcessor("org.projectlombok:lombok")
 
@@ -142,6 +146,29 @@ tasks.jacocoTestCoverageVerification {
 
 tasks.check {
     dependsOn(tasks.jacocoTestCoverageVerification)
+    dependsOn("evalGate")
+}
+
+val evalSmoke = tasks.register<JavaExec>("evalSmoke") {
+    group = "verification"
+    description = "Runs the fast offline agentic evaluation smoke subset."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.agentforge.commerce.eval.EvalRunner")
+    args("smoke")
+}
+
+tasks.register<JavaExec>("evalGate") {
+    group = "verification"
+    description = "Runs the full offline agentic evaluation gate with deterministic report drift detection."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.agentforge.commerce.eval.EvalRunner")
+    if (project.hasProperty("evalUpdateBaseline")) {
+        args("gate", "--update")
+    } else {
+        args("gate")
+    }
 }
 
 dependencyLocking {

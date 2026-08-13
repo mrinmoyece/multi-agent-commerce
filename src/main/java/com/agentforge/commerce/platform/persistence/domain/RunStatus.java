@@ -13,9 +13,11 @@ import java.util.Set;
  *
  * <pre>
  *   PENDING ──▶ RUNNING ──▶ SUCCEEDED
- *      │           │
- *      │           └──────▶ FAILED
- *      └──────────────────▶ FAILED
+ *      │           │  │
+ *      │           │  └──▶ AWAITING_APPROVAL ──▶ SUCCEEDED
+ *      │           │              │
+ *      │           └──────────────┴──────▶ FAILED
+ *      └──────────────────────────────────▶ FAILED
  * </pre>
  */
 public enum RunStatus {
@@ -24,6 +26,8 @@ public enum RunStatus {
     PENDING,
     /** Claimed by exactly one replica and executing. */
     RUNNING,
+    /** Paused pending human approval of a high-impact or low-confidence action. */
+    AWAITING_APPROVAL,
     /** Completed and a briefing was produced (possibly with degraded agents). */
     SUCCEEDED,
     /** Terminated without a usable briefing. */
@@ -33,7 +37,8 @@ public enum RunStatus {
 
     static {
         TRANSITIONS.put(PENDING, Set.of(RUNNING, FAILED));
-        TRANSITIONS.put(RUNNING, Set.of(SUCCEEDED, FAILED));
+        TRANSITIONS.put(RUNNING, Set.of(SUCCEEDED, FAILED, AWAITING_APPROVAL));
+        TRANSITIONS.put(AWAITING_APPROVAL, Set.of(SUCCEEDED, FAILED));
         TRANSITIONS.put(SUCCEEDED, Set.of());
         TRANSITIONS.put(FAILED, Set.of());
     }

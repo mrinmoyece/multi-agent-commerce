@@ -45,6 +45,39 @@ public class AgentResultEntity {
     @Column(name = "content", length = 8000)
     private String content;
 
+    @Column(name = "prompt_id", length = 128)
+    private String promptId;
+
+    @Column(name = "prompt_hash", length = 64)
+    private String promptHash;
+
+    @Column(name = "provider", length = 64)
+    private String provider;
+
+    @Column(name = "model", length = 64)
+    private String model;
+
+    @Column(name = "prompt_tokens")
+    private long promptTokens;
+
+    @Column(name = "completion_tokens")
+    private long completionTokens;
+
+    @Column(name = "cost_micros")
+    private long costMicros;
+
+    @Column(name = "confidence")
+    private double confidence;
+
+    @Column(name = "schema_valid", nullable = false)
+    private boolean schemaValid;
+
+    @Column(name = "cited_evidence_count")
+    private long citedEvidenceCount;
+
+    @Column(name = "degraded_reasons", length = 1000)
+    private String degradedReasons;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 }

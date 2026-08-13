@@ -120,6 +120,22 @@ This is a portfolio/demo project — it intentionally has no external data depen
 
 In a production version, `InventoryDataTool` would be backed by a real WMS/ERP integration, `PricingAgent` would call a competitor pricing API, and `SentimentAgent` would query a reviews/support-ticket store — at which point the existing Resilience4j circuit breakers and retries would be protecting genuine external calls instead of in-memory data generation.
 
+### Layer 2 — grounded agent runtime & offline evals
+
+Layer 2 replaces the narrative-only assumptions above with a typed,
+provider-neutral runtime (`com.agentforge.commerce.runtime.*`). Every agent now
+fetches a **grounded tool result** and returns an `AgentResultEnvelope` with
+cited `Evidence`, calibrated `Confidence`, `Freshness`, the versioned prompt
+id+hash, token/cost accounting and an explicit status. Untrusted tool data is
+injection-fenced, every output is strict-schema validated (fail-closed), per-run
+token/request/latency/cost **budgets** are hard-stopped before provider calls,
+and high-impact actions pause for **human-in-the-loop** approval. Grounding runs
+on deterministic **fixtures by default** (`runtime.tools.mode=FIXTURE`) — always
+labelled non-authoritative, never presented as live — with **live adapter
+contracts** ready for production feeds. Durable, retailer-scoped semantic memory
+stores only evidence-backed facts with hard tenant isolation. See
+[ARCHITECTURE.md](docs/ARCHITECTURE.md) and [LIMITATIONS.md](docs/LIMITATIONS.md).
+
 ## Quick Start
 
 This is a Gradle project (no Maven). The Gradle wrapper is included, so you don't need Gradle installed locally.
@@ -157,9 +173,18 @@ via environment variables / Kubernetes Secret and ConfigMap — see the
 ./gradlew check
 ```
 
-`check` runs tests, the 70% line-coverage gate, Checkstyle, and SpotBugs. CI
-also scans dependencies and repository history, emits a CycloneDX SBOM, scans
-the runtime image, and runs CodeQL.
+`check` runs tests, the 70% line-coverage gate, Checkstyle, SpotBugs, and the
+**offline agentic evaluation gate** (`evalGate`). CI also scans dependencies and
+repository history, emits a CycloneDX SBOM, scans the runtime image, and runs
+CodeQL.
+
+The evaluation gate is deterministic and offline. Run the fast subset with
+`./gradlew evalSmoke` or the full gate with `./gradlew evalGate`; it scores eight
+golden scenarios (normal, partial-failure, prompt-injection, stale/contradictory
+evidence, budget-exhaustion, malformed-output, approval-required,
+tenant-isolation) for groundedness, citation precision, completeness, schema
+validity, safety adherence and budget adherence, then fails on any threshold miss
+or drift from the committed baseline (`eval/baseline/eval-report.json`).
 
 ## Operations and security
 

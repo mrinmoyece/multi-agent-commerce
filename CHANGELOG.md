@@ -28,6 +28,49 @@
   propagation, an append-only audit trail, and unit + integration tests
   (deterministic; no Docker required for the mandatory suite).
 
+### Added — Layer 2 (agent runtime & offline evaluation)
+
+- **Typed, provider-neutral agent runtime** (`runtime.*`). Every specialist and
+  the coordinator now return an `AgentResultEnvelope` carrying explicit status
+  (OK/DEGRADED/…), grounded `Evidence` with citations, calibrated `Confidence`,
+  `Freshness`, `SourceIdentity`, token/cost `TokenUsage`, the versioned prompt
+  id + hash, and bounded payloads. Azure OpenAI remains the production provider.
+- **Grounded tool contracts** for inventory, pricing and sentiment, with
+  deterministic committed **fixture adapters** (default) and **live adapter
+  contracts** (`runtime.tools.mode=LIVE`). Fixture/simulated sources are always
+  labelled non-authoritative and surfaced as degraded — the system never claims
+  live data when a fixture is active, and every recommendation traces to cited
+  evidence.
+- **Versioned prompt registry** with content-hash pinning, an **injection-
+  resistant boundary encoder** that fences untrusted tool data, and **strict
+  JSON-schema validation** for every specialist and coordinator output (invalid
+  output fails closed to a deterministic degraded payload).
+- **Per-run budgets** (tokens, requests, latency, estimated cost) enforced as
+  hard stops *before* provider calls, with actual-usage accounting and persisted
+  budget/audit events; plus **model/provider allowlists** and per-agent model
+  selection.
+- **Durable, retailer-scoped semantic memory** backed by PostgreSQL with a Redis
+  hot cache. Only validated, evidence-backed facts are written, with provenance,
+  TTL, invalidation, deduplication and hard tenant isolation; raw model text is
+  never memorised.
+- **Human-in-the-loop risk policy** integrated with Layer 1 approvals:
+  configurable rules pause pricing changes, emergency orders and low-confidence
+  recommendations in `AWAITING_APPROVAL`, resuming deterministically after every
+  audited approval/rejection.
+- **OpenTelemetry tracing/metrics** correlated across run → agent → tool → LLM,
+  recording tokens, cost, latency, retries, degraded modes, budget stops and
+  approval waits — never prompts, credentials or sensitive payloads.
+- **Runtime brakes**: max tool calls, max agent rounds, deadline propagation,
+  cancellation, bounded concurrency, no arbitrary code execution, no
+  unrestricted URL fetches.
+- **Offline deterministic evaluation framework** (`eval.*`) with eight golden
+  scenarios (normal, partial-failure, prompt-injection, stale/contradictory
+  evidence, budget-exhaustion, malformed-output, approval-required,
+  tenant-isolation). It scores groundedness, citation precision, completeness,
+  schema validity, safety-policy adherence and budget adherence, writes a
+  byte-stable report, and enforces a committed baseline with drift detection via
+  `./gradlew evalSmoke` / `evalGate` (wired into `check` and a CI merge gate).
+
 ### Changed
 
 - Docker Compose now provisions PostgreSQL and Redis; Kubernetes manifests scale

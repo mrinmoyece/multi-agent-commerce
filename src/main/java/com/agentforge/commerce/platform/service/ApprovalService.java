@@ -8,6 +8,7 @@ import com.agentforge.commerce.platform.service.exception.InvalidStateTransition
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -21,10 +22,13 @@ public class ApprovalService {
 
     private final ApprovalRequestRepository repository;
     private final AuditService auditService;
+    private final ApplicationEventPublisher eventPublisher;
 
-    public ApprovalService(ApprovalRequestRepository repository, AuditService auditService) {
+    public ApprovalService(ApprovalRequestRepository repository, AuditService auditService,
+                           ApplicationEventPublisher eventPublisher) {
         this.repository = repository;
         this.auditService = auditService;
+        this.eventPublisher = eventPublisher;
     }
 
     /** Raise a new PENDING approval request. Invoked within a run's transaction. */
@@ -75,6 +79,7 @@ public class ApprovalService {
         ApprovalRequestEntity saved = repository.save(approval);
         auditService.record("APPROVAL_" + decision, approval.getRunId(), decidedBy,
                 "approvalId=" + approvalId);
+        eventPublisher.publishEvent(new ApprovalDecidedEvent(approval.getRunId()));
         return saved;
     }
 

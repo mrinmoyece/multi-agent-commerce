@@ -25,6 +25,43 @@ Optional controls include `LLM_TIMEOUT`, `LLM_MAX_RESPONSE_CHARACTERS`,
 the `PLATFORM_*` tunables (lock TTL, status-cache TTL, orchestration timeout/pool,
 rate-limit window/limit).
 
+### Agent runtime (Layer 2)
+
+The runtime is configured under the `runtime.*` prefix (`RuntimeProperties`):
+
+- `RUNTIME_TOOLS_MODE` (`FIXTURE` default, or `LIVE`): grounding source.
+  `FIXTURE` serves deterministic committed data labelled non-authoritative; use
+  `LIVE` only once production tool adapters and their credentials are configured.
+- `RUNTIME_BUDGET_*`: per-run ceilings — `MAXTOKENS` (120000), `MAXREQUESTS`
+  (24), `MAXLATENCY` (3m), `MAXCOSTMICROS` (500000) — plus the
+  `PROMPTMICROSPERTHOUSAND` / `COMPLETIONMICROSPERTHOUSAND` cost model.
+- `RUNTIME_MODELS_*`: `ALLOWEDPROVIDERS`, `ALLOWEDMODELS`, `DEFAULTMODEL` and
+  optional `PERAGENT` overrides. A run refuses to start on a disallowed provider.
+- `RUNTIME_BRAKES_*`: `MAXTOOLCALLS` (32), `MAXAGENTROUNDS` (4), `MAXCONCURRENCY`
+  (3), `DEADLINE` (2m).
+- `RUNTIME_MEMORY_*`: `ENABLED` (true), `FACTTTL` (7d), `MAXFACTSPERRETAILER`
+  (500), `CACHETTL` (10m).
+- `RUNTIME_RISK_*`: `ENABLED` (true), `LOWCONFIDENCETHRESHOLD` (0.5), and the
+  `PRICINGKEYWORDS` / `EMERGENCYKEYWORDS` lists that trigger a human-in-the-loop
+  hold. Runs pause in `AWAITING_APPROVAL` and resume only after every approval
+  is decided.
+
+Telemetry is emitted via Micrometer/OpenTelemetry on the management port and
+records only non-sensitive metrics (tokens, cost, latency, status, degraded
+modes, approval waits) — never prompts, payloads or credentials.
+
+### Offline evaluation gate
+
+- `./gradlew evalSmoke` — fast local subset (the `normal` scenario).
+- `./gradlew evalGate` — runs all eight golden scenarios, writes
+  `build/eval/eval-report.json`, and fails on any threshold miss or drift from
+  the committed baseline `eval/baseline/eval-report.json`. It also runs as part
+  of `./gradlew check` and as a CI merge gate.
+- `./gradlew evalGate -PevalUpdateBaseline` — regenerate the committed baseline
+  after an intended, reviewed behavioural change. The report is deterministic
+  and byte-stable, so an unreviewed change to runtime behaviour surfaces as a
+  drift failure.
+
 ## Database migrations
 
 Schema is owned by Flyway (`src/main/resources/db/migration`). Migrations run

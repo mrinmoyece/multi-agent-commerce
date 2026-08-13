@@ -27,7 +27,12 @@
 | Credential disclosure | Environment/Kubernetes secrets, redacted operational guidance, no secret defaults, Gitleaks and GitHub secret scanning |
 | Unauthenticated or over-scoped API access | OAuth2/OIDC resource server with issuer + audience validation, per-operation scope/role method security, stateless sessions, problem-detail auth failures, no static bypass |
 | Idempotency-key or replay abuse | Durable unique-key store as source of truth, request-fingerprint mismatch detection, Redis lock to reduce races, fixed-window rate limiting |
-| Prompt injection through agent findings | Findings encoded as JSON, explicit untrusted-data instruction, no tool execution, strict response schema |
+| Prompt injection through agent findings | Findings encoded as JSON, explicit untrusted-data instruction, no tool execution, strict response schema; Layer 2 adds a per-call fenced `BoundaryEncoder` block and evaluated prompt-injection golden scenario |
+| Fabricated or ungrounded recommendations | Grounded tool contracts with `SourceIdentity`/`Evidence`/`Citation`; fixture/simulated sources auto-degraded and never presented as live; evidence-or-nothing memory writes; groundedness/citation-precision eval metrics |
+| Runaway provider cost or looping | Per-run token/request/latency/cost budgets enforced as a hard stop before provider calls, plus runtime brakes (max tool calls, max agent rounds, propagated deadline, bounded concurrency) |
+| Unapproved high-impact action | Configurable human-in-the-loop `RiskPolicy` pauses pricing changes, emergency orders and low-confidence recommendations in `AWAITING_APPROVAL`; deterministic audited resume |
+| Cross-tenant memory leakage | Retailer-scoped semantic memory with provenance-matched, deduplicated, TTL-bounded writes and reads scoped by `retailerId`; tenant-isolation golden scenario |
+| Sensitive data in telemetry | OpenTelemetry records only non-sensitive metrics/attributes (tokens, cost, latency, status, degraded modes) — never prompts, payloads or credentials |
 | Unbounded or malformed model output | Transport timeout, token limits, character limit, empty-response rejection, fail-closed parsing |
 | Provider outage or throttling | Bounded retry, circuit breaker, explicit degraded specialist output |
 | Dependency/build compromise | Dependency locks/checksums, Trivy, CodeQL, SBOM, pinned Actions and base-image digests |

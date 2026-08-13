@@ -1,13 +1,26 @@
 # Limitations
 
-- Inventory data is deterministic and synthetic.
-- Pricing and sentiment findings are model-generated narratives without live
-  market, review, support, or returns feeds. They are not decision-grade.
+- **Default grounding is deterministic fixture data, not live feeds.** In the
+  default `runtime.tools.mode=FIXTURE` mode the inventory, pricing and sentiment
+  tools return committed deterministic fixtures. These are explicitly labelled
+  non-authoritative (`SourceKind.FIXTURE`) and surfaced as `DEGRADED`, so the
+  system never claims live data — but they are not decision-grade. Live adapter
+  contracts exist (`runtime.tools.mode=LIVE`); the concrete production adapters
+  and their credentials/endpoints must be supplied before live use.
+- Recommendations now trace to cited evidence, but the underlying evidence is
+  only as good as the configured source; with fixtures active it is illustrative.
+- Provider calls are bounded and budgeted, but a nondeterministic model cannot be
+  made fully reliable or factual; strict schema validation and fail-closed
+  degradation reduce, but do not eliminate, low-quality output.
+- The offline evaluation gate is deterministic by design: it drives the engine
+  with a scripted, network-free provider, so it validates runtime wiring,
+  grounding, fencing, budgets, schema handling, risk gating and tenant isolation
+  — not the quality of a real model's generations.
+- Semantic memory enforces provenance, dedup, TTL and tenant scoping, but
+  eviction and expiry are best-effort at read/write time rather than a
+  continuously running reaper.
 - The REST API, OAuth2 resource server, PostgreSQL persistence, Redis
-  coordination, durable run state, and append-only audit trail are in place, but
-  agent *inputs* remain synthetic/LLM-extrapolated as above.
-- Provider calls are bounded but cannot make a nondeterministic model fully
-  reliable or factual.
+  coordination, durable run state, and append-only audit trail are in place.
 - Testcontainers-based integration tests (real PostgreSQL) are provided but are
   automatically skipped when a Docker daemon is unavailable; the mandatory suite
   runs deterministically on H2 (PostgreSQL mode) with in-memory coordination, so

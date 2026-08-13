@@ -7,9 +7,11 @@ import com.agentforge.commerce.platform.config.PlatformProperties;
 import com.agentforge.commerce.platform.coordination.LockHandle;
 import com.agentforge.commerce.platform.coordination.RunStatusCache;
 import com.agentforge.commerce.platform.persistence.domain.AgentResultStatus;
+import com.agentforge.commerce.platform.persistence.domain.ApprovalStatus;
 import com.agentforge.commerce.platform.persistence.domain.RunStatus;
 import com.agentforge.commerce.platform.persistence.entity.AgentResultEntity;
 import com.agentforge.commerce.platform.persistence.entity.AnalysisRunEntity;
+import com.agentforge.commerce.platform.persistence.entity.ApprovalRequestEntity;
 import com.agentforge.commerce.platform.persistence.entity.IdempotencyKeyEntity;
 import com.agentforge.commerce.platform.persistence.repo.AgentResultRepository;
 import com.agentforge.commerce.platform.persistence.repo.AnalysisRunRepository;
@@ -17,10 +19,18 @@ import com.agentforge.commerce.platform.persistence.repo.IdempotencyKeyRepositor
 import com.agentforge.commerce.platform.service.exception.IdempotencyConflictException;
 import com.agentforge.commerce.platform.service.exception.InvalidStateTransitionException;
 import com.agentforge.commerce.platform.service.exception.RunNotFoundException;
+import com.agentforge.commerce.runtime.contract.AgentResultEnvelope;
+import com.agentforge.commerce.runtime.contract.TokenUsage;
+import com.agentforge.commerce.runtime.engine.RuntimeRunReport;
+import com.agentforge.commerce.runtime.policy.RiskDecision;
+import com.agentforge.commerce.runtime.policy.RiskPolicy;
+import com.agentforge.commerce.runtime.telemetry.RuntimeTelemetry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -30,6 +40,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.event.TransactionalEventListener;
 
 /**
  * Transactional owner of the analysis-run aggregate. Enforces the run state
@@ -53,6 +64,8 @@ public class AnalysisRunService {
     private final PlatformProperties properties;
     private final ObjectMapper objectMapper;
     private final ApplicationEventPublisher eventPublisher;
+    private final RiskPolicy riskPolicy;
+    private final RuntimeTelemetry telemetry;
 
     @SuppressWarnings("checkstyle:ParameterNumber")
     public AnalysisRunService(
@@ -65,7 +78,9 @@ public class AnalysisRunService {
             RunStatusCache statusCache,
             PlatformProperties properties,
             ObjectMapper objectMapper,
-            ApplicationEventPublisher eventPublisher) {
+            ApplicationEventPublisher eventPublisher,
+            RiskPolicy riskPolicy,
+            RuntimeTelemetry telemetry) {
         this.runRepository = runRepository;
         this.agentResultRepository = agentResultRepository;
         this.idempotencyKeyRepository = idempotencyKeyRepository;
@@ -76,6 +91,8 @@ public class AnalysisRunService {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
+        this.riskPolicy = riskPolicy;
+        this.telemetry = telemetry;
     }
 
     /**
@@ -189,31 +206,112 @@ public class AnalysisRunService {
         return Optional.of(saved);
     }
 
-    /** Record a successful run: persist briefing, per-agent results and approvals. */
+    /**
+     * Record the outcome of a run. Persists the briefing, runtime metadata,
+     * per-agent envelopes and approvals, then either finalises the run to
+     * {@code SUCCEEDED} or, when the human-in-the-loop risk policy flags a
+     * high-impact or low-confidence action, pauses it in {@code AWAITING_APPROVAL}
+     * until every approval is decided.
+     */
     @Transactional
     public AnalysisRunEntity completeRun(UUID runId, OrchestrationResult result) {
         AnalysisRunEntity run = findRun(runId);
-        if (!run.getStatus().canTransitionTo(RunStatus.SUCCEEDED)) {
-            throw new InvalidStateTransitionException(
-                    "Run " + runId + " cannot succeed from " + run.getStatus());
-        }
         DailyBriefing briefing = result.briefing();
+        RiskDecision decision = riskPolicy.evaluate(briefing, result.report());
+        RunStatus target = decision.requiresApproval() ? RunStatus.AWAITING_APPROVAL : RunStatus.SUCCEEDED;
+        if (!run.getStatus().canTransitionTo(target)) {
+            throw new InvalidStateTransitionException(
+                    "Run " + runId + " cannot move to " + target + " from " + run.getStatus());
+        }
+
+        applyBriefing(run, briefing);
+        applyRunMetadata(run, result.report());
+        run.setStatus(target);
+        run.setUpdatedAt(Instant.now());
+        if (target == RunStatus.SUCCEEDED) {
+            run.setCompletedAt(Instant.now());
+        } else {
+            run.setRiskReasons(truncateReason(String.join(",", decision.reasons())));
+        }
+        AnalysisRunEntity saved = runRepository.save(run);
+
+        persistAgentResults(runId, result);
+        raiseApprovals(saved, briefing);
+
+        if (target == RunStatus.AWAITING_APPROVAL) {
+            telemetry.recordApprovalWait(runId.toString());
+            auditService.record("RUN_AWAITING_APPROVAL", runId, run.getRequestedBy(),
+                    "reasons=" + String.join(",", decision.reasons()));
+        } else {
+            auditService.record("RUN_SUCCEEDED", runId, run.getRequestedBy(),
+                    "actions=" + safeSize(briefing.getRecommendedActions()));
+        }
+        cacheStatus(saved);
+        return saved;
+    }
+
+    /**
+     * Resume a run paused for approval once all of its approvals have been decided.
+     * Triggered after an approval decision commits; deterministic and idempotent —
+     * it finalises to {@code SUCCEEDED} only when no approval remains pending and
+     * the run is still {@code AWAITING_APPROVAL}. Rejected actions are audited but
+     * do not block completion (they are simply not enacted).
+     */
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
+    @TransactionalEventListener
+    public void resumeIfReady(ApprovalDecidedEvent event) {
+        AnalysisRunEntity run = runRepository.findById(event.runId()).orElse(null);
+        if (run == null || run.getStatus() != RunStatus.AWAITING_APPROVAL) {
+            return;
+        }
+        List<ApprovalRequestEntity> approvals = approvalService.listForRun(event.runId());
+        boolean stillPending = approvals.stream()
+                .anyMatch(approval -> approval.getStatus() == ApprovalStatus.PENDING);
+        if (stillPending || !run.getStatus().canTransitionTo(RunStatus.SUCCEEDED)) {
+            return;
+        }
         run.setStatus(RunStatus.SUCCEEDED);
+        run.setCompletedAt(Instant.now());
+        run.setUpdatedAt(Instant.now());
+        AnalysisRunEntity saved = runRepository.save(run);
+        long rejected = approvals.stream()
+                .filter(approval -> approval.getStatus() == ApprovalStatus.REJECTED).count();
+        auditService.record("RUN_RESUMED", event.runId(), run.getRequestedBy(),
+                "approvals=" + approvals.size() + " rejected=" + rejected);
+        cacheStatus(saved);
+    }
+
+    private void applyBriefing(AnalysisRunEntity run, DailyBriefing briefing) {
         run.setExecutiveSummary(truncate(briefing.getExecutiveSummary()));
         run.setCrossInsights(truncate(joinLines(briefing.getCrossInsights())));
         run.setRecommendedActions(truncate(joinLines(briefing.getRecommendedActions())));
         run.setUrgentAlerts(truncate(joinLines(briefing.getUrgentAlerts())));
-        run.setCompletedAt(Instant.now());
-        run.setUpdatedAt(Instant.now());
-        AnalysisRunEntity saved = runRepository.save(run);
+    }
 
-        persistAgentResults(runId, result.agentMessages());
-        raiseApprovals(saved, briefing);
-
-        auditService.record("RUN_SUCCEEDED", runId, run.getRequestedBy(),
-                "actions=" + safeSize(briefing.getRecommendedActions()));
-        cacheStatus(saved);
-        return saved;
+    private void applyRunMetadata(AnalysisRunEntity run, RuntimeRunReport report) {
+        if (report == null) {
+            return;
+        }
+        run.setDegraded(report.degraded());
+        run.setToolCalls(report.toolCalls());
+        run.setAgentRounds(report.agentRounds());
+        TokenUsage usage = report.totalUsage();
+        run.setPromptTokens(usage.promptTokens());
+        run.setCompletionTokens(usage.completionTokens());
+        run.setCostMicros(usage.estimatedCostMicros());
+        AgentResultEnvelope coordinator = report.coordinator();
+        if (coordinator != null) {
+            run.setPromptId(coordinator.promptId());
+            run.setPromptHash(coordinator.promptHash());
+            run.setProvider(coordinator.provider());
+            run.setModel(coordinator.model());
+        }
+        List<AgentResultEnvelope> envelopes = report.allEnvelopes();
+        double min = 1.0;
+        for (AgentResultEnvelope envelope : envelopes) {
+            min = Math.min(min, envelope.confidence().value());
+        }
+        run.setMinConfidence(envelopes.isEmpty() ? 0.0 : min);
     }
 
     /** Record a failed run with a non-sensitive reason. */
@@ -238,8 +336,12 @@ public class AnalysisRunService {
         return statusCache.get(runId);
     }
 
-    private void persistAgentResults(UUID runId, List<AgentMessage> messages) {
-        for (AgentMessage message : messages) {
+    private void persistAgentResults(UUID runId, OrchestrationResult result) {
+        Map<String, AgentResultEnvelope> envelopes = new HashMap<>();
+        for (AgentResultEnvelope envelope : result.report().specialists()) {
+            envelopes.put(envelope.agentName(), envelope);
+        }
+        for (AgentMessage message : result.agentMessages()) {
             AgentResultEntity entity = new AgentResultEntity();
             entity.setId(UUID.randomUUID());
             entity.setRunId(runId);
@@ -248,9 +350,29 @@ public class AnalysisRunService {
             entity.setStatus(status);
             entity.setPriority(message.getPriority() == null ? "NORMAL" : message.getPriority().name());
             entity.setContent(truncate(message.getContent()));
+            applyEnvelopeMetadata(entity, envelopes.get(message.getAgentName()));
             entity.setCreatedAt(Instant.now());
             agentResultRepository.save(entity);
         }
+    }
+
+    private static void applyEnvelopeMetadata(AgentResultEntity entity, AgentResultEnvelope envelope) {
+        if (envelope == null) {
+            entity.setSchemaValid(true);
+            return;
+        }
+        entity.setPromptId(envelope.promptId());
+        entity.setPromptHash(envelope.promptHash());
+        entity.setProvider(envelope.provider());
+        entity.setModel(envelope.model());
+        entity.setPromptTokens(envelope.usage().promptTokens());
+        entity.setCompletionTokens(envelope.usage().completionTokens());
+        entity.setCostMicros(envelope.usage().estimatedCostMicros());
+        entity.setConfidence(envelope.confidence().value());
+        entity.setSchemaValid(envelope.schemaValid());
+        entity.setCitedEvidenceCount(envelope.citedEvidenceCount());
+        String reasons = String.join(",", envelope.degradedReasons());
+        entity.setDegradedReasons(reasons.length() > 1000 ? reasons.substring(0, 1000) : reasons);
     }
 
     private void raiseApprovals(AnalysisRunEntity run, DailyBriefing briefing) {

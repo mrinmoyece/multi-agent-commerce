@@ -94,6 +94,7 @@ public class DurableRunExecutor {
         AnalysisRunEntity run = claimed.get();
         try {
             DailyAnalysisContext context = DailyAnalysisContext.builder()
+                    .runId(runId.toString())
                     .date(run.getBusinessDate())
                     .retailerId(run.getRetailerId())
                     .build();

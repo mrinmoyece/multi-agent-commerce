@@ -47,6 +47,34 @@ llm:
 retailer:
   id: ${RETAILER_ID:default-retailer}
 
+# Layer 2 agent runtime: provider-neutral safety envelope (budgets, model/provider
+# allowlists, tool grounding mode, brakes, durable memory, and human-in-the-loop
+# risk gating). Grounding defaults to committed FIXTURE data; set RUNTIME_TOOLS_MODE=LIVE
+# with the production adapter backends configured to use live systems of record.
+runtime:
+  tools:
+    mode: ${RUNTIME_TOOLS_MODE:FIXTURE}
+  models:
+    allowed-providers: ${RUNTIME_ALLOWED_PROVIDERS:azure-openai,github-models}
+    allowed-models: ${RUNTIME_ALLOWED_MODELS:gpt-4o,gpt-4o-mini}
+    default-model: ${RUNTIME_DEFAULT_MODEL:gpt-4o}
+  budget:
+    max-tokens: ${RUNTIME_MAX_TOKENS:120000}
+    max-requests: ${RUNTIME_MAX_REQUESTS:24}
+    max-latency: ${RUNTIME_MAX_LATENCY:3m}
+    max-cost-micros: ${RUNTIME_MAX_COST_MICROS:500000}
+  brakes:
+    max-tool-calls: ${RUNTIME_MAX_TOOL_CALLS:32}
+    max-agent-rounds: ${RUNTIME_MAX_AGENT_ROUNDS:4}
+    deadline: ${RUNTIME_DEADLINE:2m}
+  memory:
+    enabled: ${RUNTIME_MEMORY_ENABLED:true}
+    fact-ttl: ${RUNTIME_MEMORY_TTL:7d}
+    max-facts-per-retailer: ${RUNTIME_MEMORY_MAX_FACTS:500}
+  risk:
+    enabled: ${RUNTIME_RISK_ENABLED:true}
+    low-confidence-threshold: ${RUNTIME_RISK_LOW_CONFIDENCE:0.5}
+
 # Platform foundations: distributed coordination + resource-server security.
 # Production posture is fail-closed — Redis is required by default and the
 # OAuth2 issuer/audience MUST be provided via environment variables
@@ -118,3 +146,12 @@ management:
   metrics:
     tags:
       application: ${spring.application.name}
+  tracing:
+    sampling:
+      probability: ${MANAGEMENT_TRACING_SAMPLING:0.1}
+  otlp:
+    tracing:
+      # OTLP span export is opt-in: enable and point at your collector in prod.
+      export:
+        enabled: ${MANAGEMENT_OTLP_TRACING_ENABLED:false}
+      endpoint: ${MANAGEMENT_OTLP_TRACING_ENDPOINT:http://localhost:4318/v1/traces}

@@ -31,6 +31,13 @@ spring:
 management:
   server:
     port: -1
+  tracing:
+    sampling:
+      probability: 0.0
+  otlp:
+    tracing:
+      export:
+        enabled: false
 
 platform:
   redis-enabled: false
@@ -40,6 +47,17 @@ platform:
     audiences:
       - test-audience
     roles-claim: roles
+
+# Layer 2 runtime posture for tests: deterministic fixtures, human-in-the-loop
+# risk gating disabled so runs finalise synchronously (dedicated HITL tests flip
+# runtime.risk.enabled on), durable memory enabled against H2, tracing export off.
+runtime:
+  tools:
+    mode: FIXTURE
+  risk:
+    enabled: false
+  memory:
+    enabled: true
 
 logging:
   level:
