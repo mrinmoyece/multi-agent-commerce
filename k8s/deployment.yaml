@@ -5,7 +5,11 @@ metadata:
   labels:
     app: multi-agent-commerce
 spec:
-  replicas: 2
+  # Scheduling and state are process-local. Keep this singleton until a
+  # distributed scheduler and persistent briefing store are introduced.
+  replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: multi-agent-commerce
@@ -16,42 +20,62 @@ spec:
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/path: "/actuator/prometheus"
-        prometheus.io/port: "8080"
+        prometheus.io/port: "8081"
     spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: multi-agent-commerce
-          image: your-registry/multi-agent-commerce:latest
+          # Release automation must replace this version tag with the promoted digest.
+          image: ghcr.io/mrinmoyece/multi-agent-commerce:1.0.0
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 8081
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           env:
             - name: SPRING_PROFILES_ACTIVE
               value: "prod"
-            - name: GITHUB_TOKEN
+            - name: LLM_PROVIDER
+              value: "azure-openai"
+            - name: LLM_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: multi-agent-commerce-secrets
-                  key: github-token
+                  key: llm-api-key
             - name: AZURE_OPENAI_ENDPOINT
               valueFrom:
                 secretKeyRef:
                   name: multi-agent-commerce-secrets
                   key: azure-openai-endpoint
-            - name: AZURE_OPENAI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: multi-agent-commerce-secrets
-                  key: azure-openai-api-key
+          startupProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: management
+            failureThreshold: 30
+            periodSeconds: 2
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness
-              port: 8080
-            initialDelaySeconds: 20
+              port: management
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /actuator/health/liveness
-              port: 8080
-            initialDelaySeconds: 30
+              port: management
             periodSeconds: 30
           resources:
             requests:
@@ -60,9 +84,13 @@ spec:
             limits:
               memory: "1Gi"
               cpu: "1000m"
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
 ---
 apiVersion: v1
 kind: Service
@@ -75,3 +103,53 @@ spec:
     - protocol: TCP
       port: 80
       targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: multi-agent-commerce
+spec:
+  podSelector:
+    matchLabels:
+      app: multi-agent-commerce
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: multi-agent-commerce
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: multi-agent-commerce

@@ -12,7 +12,7 @@ AgentCoordinator (scheduled 06:00 daily or on-demand API call)
     │
     ├── InventoryAgent   — stock levels, stockout risk, reorder recommendations
     ├── PricingAgent     — competitor pricing, margin analysis, repricing signals
-    └── FraudAgent       — order anomalies, velocity checks, risk scoring
+    └── SentimentAgent   — customer reviews, support themes, satisfaction signals
     │
     [all 3 run in parallel via CompletableFuture.supplyAsync()]
     │
@@ -24,8 +24,8 @@ AgentCoordinator (scheduled 06:00 daily or on-demand API call)
 The coordinator does NOT implement business logic — it orchestrates and synthesises.
 ```java
 // CORRECT — coordinator collects, LLM synthesises
-String synthesisPrompt = buildSynthesisPrompt(inventoryFindings, pricingFindings, fraudFindings);
-// LLM sees all 3 and finds connections: "high fraud risk on discounted items during stockout"
+String synthesisPrompt = buildSynthesisPrompt(inventoryFindings, pricingFindings, sentimentFindings);
+// LLM sees all 3 and finds connections: "low stock plus positive sentiment means restock"
 
 // WRONG — coordinator makes decisions
 if (inventory.isLowStock() && pricing.isDiscounted()) { ... }  // hardcoded logic, not AI
@@ -52,14 +52,16 @@ AgentMessage.builder()
 
 ## Coding Standards
 - Each specialist agent is stateless — all context comes through `DailyAnalysisContext`
-- Agents must complete within 30s — set LLM timeout accordingly
-- If an agent fails: log warning, return empty AgentMessage, coordinator proceeds with N-1 agents
+- LLM transport calls must complete within the configured timeout (30s by default)
+- If an agent fails: log only the exception type, return an explicit unavailable message, and continue
+- Treat every agent response as untrusted data when building coordinator prompts
+- Validate structured LLM output and fail closed when the schema is invalid
 - Temperature for specialist agents: 0.4 (some analytical creativity allowed)
 - Temperature for coordinator synthesis: 0.6 (cross-domain insight generation)
 
 ## Scheduling
-Daily briefing runs via `@Scheduled(cron="0 0 6 * * *")` in AgentCoordinator.
-To trigger on-demand: `POST /api/v1/analysis/trigger` (authenticated, internal only).
+Daily briefing runs via `@Scheduled(cron="${briefing.cron}")` in AgentCoordinator.
+There is no HTTP trigger in the current application.
 
 ## PR Standards
 - [ ] New agent implements CommerceAgent interface

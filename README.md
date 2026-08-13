@@ -1,10 +1,11 @@
-# Multi-Agent E-Commerce Operations Platform 🛒
+# Multi-Agent E-Commerce Operations Platform
 
 > Three specialist AI agents — Inventory, Pricing, Sentiment — working in parallel, synthesised by a Coordinator Agent into a daily executive briefing. Built with Java 21, Spring Boot, and Azure OpenAI / GitHub Models.
 
-[![Java](https://img.shields.io/badge/Java-21-orange)](https://openjdk.org/projects/jdk/21/)
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.4.6-brightgreen)](https://spring.io/projects/spring-boot)
-[![Multi-Agent](https://img.shields.io/badge/Architecture-Multi--Agent-purple)](https://github.com/mrinmoyece/multi-agent-commerce)
+[![CI](https://github.com/mrinmoyece/multi-agent-commerce/actions/workflows/ci.yml/badge.svg)](https://github.com/mrinmoyece/multi-agent-commerce/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/mrinmoyece/multi-agent-commerce/actions/workflows/codeql.yml/badge.svg)](https://github.com/mrinmoyece/multi-agent-commerce/actions/workflows/codeql.yml)
+[![Java](https://img.shields.io/badge/Java-21%20LTS-orange)](https://openjdk.org/projects/jdk/21/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.5.16-brightgreen)](https://spring.io/projects/spring-boot)
 
 ## Architecture — Multi-Agent Orchestration
 
@@ -88,13 +89,14 @@ in outerwear.
 
 | Concern | Technology |
 |---------|-----------|
-| Framework | Spring Boot 3.4.6, Java 21 |
+| Framework | Spring Boot 3.5.16, Java 21 LTS |
 | Concurrency | Java 21 virtual threads (`spring.threads.virtual.enabled=true`) for request handling; a dedicated `commerce-agent-` task executor (configured under `spring.task.execution` in `application.yml`) for parallel agent dispatch |
 | LLM | Azure OpenAI GPT-4o, or GitHub Models (configurable via `llm.provider`) |
 | Data | Synthetic in-memory data (see below) — no external database |
-| Resilience | Resilience4j circuit breaker + retry around LLM and data-tool calls |
+| Resilience | Resilience4j circuit breaker + retry, 30-second transport timeout, bounded LLM responses |
 | Scheduling | Spring `@Scheduled` (`AgentCoordinator.scheduledDailyAnalysis`), cron driven by `briefing.cron` (default `0 0 6 * * *` — 06:00 daily) |
-| Observability | Micrometer + Prometheus (`/actuator/prometheus`), structured JSON logging via Logstash encoder |
+| Observability | Micrometer + Prometheus on the internal management port (`8081`), structured JSON logging |
+| Supply chain | Dependency locks/checksums, CycloneDX SBOM, Trivy, pinned Actions and container bases |
 
 ## Simulated Data & Current Limitations
 
@@ -114,10 +116,11 @@ This is a Gradle project (no Maven). The Gradle wrapper is included, so you don'
 
 ```bash
 export AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com
-export AZURE_OPENAI_API_KEY=your-key
+export LLM_PROVIDER=azure-openai
+export LLM_API_KEY=your-key
 # — or, to use GitHub Models instead of Azure OpenAI —
-export LLM_PROVIDER=github_models
-export GITHUB_TOKEN=your-github-token
+export LLM_PROVIDER=github-models
+export LLM_API_KEY=your-github-token
 
 ./gradlew bootRun
 ```
@@ -127,5 +130,24 @@ The daily briefing runs automatically on the schedule defined by `briefing.cron`
 ### Running tests
 
 ```bash
-./gradlew test
+./gradlew check
 ```
+
+`check` runs tests, the 70% line-coverage gate, Checkstyle, and SpotBugs. CI
+also scans dependencies and repository history, emits a CycloneDX SBOM, scans
+the runtime image, and runs CodeQL.
+
+## Operations and security
+
+- Application traffic uses port `8080`; health and metrics use the internal
+  management port `8081`.
+- The production manifest runs one replica because scheduling is process-local.
+  Scaling out before introducing distributed scheduling would create duplicate
+  daily briefings.
+- Containers run as UID `10001`, without Linux capabilities or service-account
+  credentials, with a read-only root filesystem in Kubernetes.
+- LLM output is bounded and validated. Coordinator synthesis fails closed if it
+  does not match the briefing JSON schema.
+
+See the [documentation map](docs/README.md), [runbook](docs/RUNBOOK.md),
+[security model](docs/SECURITY_MODEL.md), and [known limitations](docs/LIMITATIONS.md).

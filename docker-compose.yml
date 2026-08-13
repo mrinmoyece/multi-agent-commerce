@@ -1,29 +1,37 @@
-version: "3.9"
 services:
   app:
     build: .
+    init: true
     environment:
       SPRING_PROFILES_ACTIVE: dev
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
       LLM_PROVIDER: ${LLM_PROVIDER:-github-models}
+      LLM_API_KEY: ${LLM_API_KEY:?Set LLM_API_KEY in .env}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
-      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8081/actuator/health/readiness"]
       interval: 15s
       timeout: 5s
       retries: 5
+      start_period: 30s
   prometheus:
-    image: prom/prometheus:v2.51.0
+    image: prom/prometheus:v3.7.3@sha256:6573196e5dbe834779ac4d34cb053113cc502a69e9e20ba3be96d37f33e81545
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
   grafana:
-    image: grafana/grafana:10.4.0
+    image: grafana/grafana:12.3.0@sha256:793c8719b0043ed885d1e75200a62d8adf63f0eae00f6f12b7a98eb7293a525c
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"

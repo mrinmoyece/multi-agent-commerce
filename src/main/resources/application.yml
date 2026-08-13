@@ -7,18 +7,15 @@ spring:
 
 server:
   port: 8080
+  shutdown: graceful
 
 llm:
-  provider: ${LLM_PROVIDER:github_models}
+  provider: ${LLM_PROVIDER:github-models}
   chat-deployment: ${AZURE_CHAT_DEPLOYMENT:gpt-4o}
-
-azure:
-  openai:
-    endpoint: ${AZURE_OPENAI_ENDPOINT:}
-    key: ${AZURE_OPENAI_API_KEY:}
-
-github:
-  token: ${GITHUB_TOKEN:}
+  endpoint: ${AZURE_OPENAI_ENDPOINT:}
+  api-key: ${LLM_API_KEY:${AZURE_OPENAI_API_KEY:${GITHUB_TOKEN:}}}
+  timeout: ${LLM_TIMEOUT:30s}
+  max-response-characters: ${LLM_MAX_RESPONSE_CHARACTERS:32768}
 
 retailer:
   id: ${RETAILER_ID:default-retailer}
@@ -38,19 +35,36 @@ spring.task.scheduling:
     size: 2
   thread-name-prefix: briefing-scheduler-
 
+spring.lifecycle:
+  timeout-per-shutdown-phase: 30s
+
 resilience4j:
   circuitbreaker:
     instances:
       llm:
         sliding-window-size: 5
+        minimum-number-of-calls: 5
         failure-rate-threshold: 60
         wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 2
+  retry:
+    instances:
+      llm:
+        max-attempts: 2
+        wait-duration: 500ms
 
 management:
+  server:
+    port: ${MANAGEMENT_PORT:8081}
   endpoints:
     web:
       exposure:
         include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
   metrics:
     tags:
       application: ${spring.application.name}

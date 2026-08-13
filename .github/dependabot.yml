@@ -4,19 +4,34 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
     open-pull-requests-limit: 10
     groups:
       spring-boot:
         patterns:
           - "org.springframework.boot:*"
           - "io.spring.dependency-management:*"
+      resilience4j:
+        patterns:
+          - "io.github.resilience4j:*"
 
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    groups:
+      actions:
+        patterns: ["*"]

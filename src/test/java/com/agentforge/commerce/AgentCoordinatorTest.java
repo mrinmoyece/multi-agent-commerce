@@ -4,11 +4,11 @@ import com.agentforge.commerce.agent.InventoryAgent;
 import com.agentforge.commerce.agent.PricingAgent;
 import com.agentforge.commerce.agent.SentimentAgent;
 import com.agentforge.commerce.coordinator.AgentCoordinator;
+import com.agentforge.commerce.coordinator.DailyAnalysisException;
+import com.agentforge.commerce.llm.LlmGateway;
 import com.agentforge.commerce.model.AgentMessage;
 import com.agentforge.commerce.model.DailyAnalysisContext;
 import com.agentforge.commerce.model.DailyBriefing;
-import com.azure.ai.openai.OpenAIClient;
-import com.azure.ai.openai.models.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -21,12 +21,12 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
 import java.time.LocalDate;
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.*;
@@ -47,12 +47,9 @@ class AgentCoordinatorTest {
     @Mock InventoryAgent inventoryAgent;
     @Mock PricingAgent   pricingAgent;
     @Mock SentimentAgent sentimentAgent;
-    @Mock OpenAIClient   openAIClient;
+    @Mock LlmGateway     llmGateway;
     @Spy  ObjectMapper   objectMapper = new ObjectMapper();
-    // Synchronous stand-in for the "commerce-agent-" pool — runs supplyAsync tasks
-    // on the calling thread so tests stay deterministic. @Spy (rather than @Mock)
-    // so the real execute(Runnable) implementation below actually runs the task.
-    @Spy  Executor applicationTaskExecutor = Runnable::run;
+    @Mock Executor applicationTaskExecutor;
 
     @InjectMocks
     AgentCoordinator coordinator;
@@ -61,6 +58,10 @@ class AgentCoordinatorTest {
 
     @BeforeEach
     void setUp() {
+        doAnswer(invocation -> {
+            invocation.<Runnable>getArgument(0).run();
+            return null;
+        }).when(applicationTaskExecutor).execute(any(Runnable.class));
         context = DailyAnalysisContext.builder()
                 .date(LocalDate.of(2026, 6, 19))
                 .retailerId("RETAILER-UK-001")
@@ -73,13 +74,10 @@ class AgentCoordinatorTest {
         // given — all specialist agents return findings
         given(inventoryAgent.analyse(context)).willReturn(agentMessage("InventoryAgent",
                 "{\"risks\":[\"6 critical SKUs\"],\"summary\":\"Restock urgently\"}"));
-        given(inventoryAgent.getName()).willReturn("InventoryAgent");
         given(pricingAgent.analyse(context)).willReturn(agentMessage("PricingAgent",
                 "{\"opportunities\":[\"Competitor gap on SKU-009\"],\"summary\":\"3 pricing gaps found\"}"));
-        given(pricingAgent.getName()).willReturn("PricingAgent");
         given(sentimentAgent.analyse(context)).willReturn(agentMessage("SentimentAgent",
                 "{\"nps\":72,\"topTheme\":\"Delivery speed\",\"summary\":\"Sentiment up 4 pts\"}"));
-        given(sentimentAgent.getName()).willReturn("SentimentAgent");
 
         stubLlmSynthesis("""
                 {
@@ -105,7 +103,7 @@ class AgentCoordinatorTest {
         verify(inventoryAgent).analyse(context);
         verify(pricingAgent).analyse(context);
         verify(sentimentAgent).analyse(context);
-        verify(openAIClient).getChatCompletions(anyString(), any(ChatCompletionsOptions.class));
+        verify(llmGateway).complete(anyString(), eq(1500), eq(0.2));
     }
 
     @Test
@@ -116,9 +114,7 @@ class AgentCoordinatorTest {
         given(inventoryAgent.analyse(context))
                 .willThrow(new RuntimeException("WMS connection timeout"));
         given(pricingAgent.analyse(context)).willReturn(agentMessage("PricingAgent", "Pricing OK"));
-        given(pricingAgent.getName()).willReturn("PricingAgent");
         given(sentimentAgent.analyse(context)).willReturn(agentMessage("SentimentAgent", "Sentiment OK"));
-        given(sentimentAgent.getName()).willReturn("SentimentAgent");
 
         stubLlmSynthesis("""
                 {
@@ -140,24 +136,17 @@ class AgentCoordinatorTest {
     }
 
     @Test
-    @DisplayName("Malformed synthesis JSON → briefing returned with raw content as summary")
-    void malformedSynthesisJson_fallsBackGracefully() throws ExecutionException, InterruptedException {
+    @DisplayName("Malformed synthesis JSON fails closed")
+    void malformedSynthesisJson_failsClosed() {
         given(inventoryAgent.analyse(context)).willReturn(agentMessage("InventoryAgent", "OK"));
-        given(inventoryAgent.getName()).willReturn("InventoryAgent");
         given(pricingAgent.analyse(context)).willReturn(agentMessage("PricingAgent", "OK"));
-        given(pricingAgent.getName()).willReturn("PricingAgent");
         given(sentimentAgent.analyse(context)).willReturn(agentMessage("SentimentAgent", "OK"));
-        given(sentimentAgent.getName()).willReturn("SentimentAgent");
 
         stubLlmSynthesis("This is not JSON — the LLM returned prose instead.");
 
-        // when — must NOT throw
-        CompletableFuture<DailyBriefing> future = coordinator.runDailyAnalysis(context);
-        DailyBriefing briefing = future.get();
-
-        assertThat(briefing).isNotNull();
-        assertThat(briefing.getExecutiveSummary()).isNotBlank();
-        assertThat(briefing.getGeneratedAt()).isNotNull();
+        assertThatThrownBy(() -> coordinator.runDailyAnalysis(context))
+                .isInstanceOf(DailyAnalysisException.class)
+                .hasMessageContaining("Daily analysis failed");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -172,13 +161,6 @@ class AgentCoordinatorTest {
     }
 
     private void stubLlmSynthesis(String jsonResponse) {
-        ChatResponseMessage msg = mock(ChatResponseMessage.class);
-        given(msg.getContent()).willReturn(jsonResponse);
-        ChatChoice choice = mock(ChatChoice.class);
-        given(choice.getMessage()).willReturn(msg);
-        ChatCompletions completions = mock(ChatCompletions.class);
-        given(completions.getChoices()).willReturn(List.of(choice));
-        given(openAIClient.getChatCompletions(anyString(), any(ChatCompletionsOptions.class)))
-                .willReturn(completions);
+        given(llmGateway.complete(anyString(), eq(1500), eq(0.2))).willReturn(jsonResponse);
     }
 }

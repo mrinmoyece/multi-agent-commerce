@@ -2,13 +2,10 @@ package com.agentforge.commerce.agent;
 
 import com.agentforge.commerce.model.AgentMessage;
 import com.agentforge.commerce.model.DailyAnalysisContext;
+import com.agentforge.commerce.llm.LlmGateway;
 import com.agentforge.commerce.tool.InventoryDataTool;
-import com.azure.ai.openai.OpenAIClient;
-import com.azure.ai.openai.models.*;
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -30,10 +27,7 @@ import java.util.UUID;
 public class InventoryAgent implements CommerceAgent {
 
     private final InventoryDataTool inventoryDataTool;
-    private final OpenAIClient openAIClient;
-
-    @Value("${llm.chat-deployment:gpt-4o}")
-    private String chatDeployment;
+    private final LlmGateway llmGateway;
 
     @Override
     public String getName() { return "InventoryAgent"; }
@@ -68,14 +62,9 @@ public class InventoryAgent implements CommerceAgent {
 
     /**
      * Calls the LLM to turn raw stock-level data into an inventory briefing.
-     * Protected by the "llm" circuit breaker — when the LLM is unavailable or the
-     * circuit is open, {@link #callLLMFallback} returns a safe degraded response
-     * instead of failing the whole agent run.
-     *
-     * Package-private (not {@code private}) so the Resilience4j AOP proxy can
-     * intercept the call — Spring's proxy-based AOP cannot advise private methods.
+     * The injected gateway owns retries, circuit breaking, response bounds, and
+     * transport timeouts. A failure produces an explicit degraded response.
      */
-    @CircuitBreaker(name = "llm", fallbackMethod = "callLLMFallback")
     String callLLM(List<InventoryDataTool.StockLevel> all,
                    List<InventoryDataTool.StockLevel> critical,
                    List<InventoryDataTool.StockLevel> overstocked) {
@@ -101,11 +90,11 @@ public class InventoryAgent implements CommerceAgent {
                 overstocked.size(),
                 overstocked.stream().map(InventoryDataTool.StockLevel::getSku).limit(5).toList());
 
-        var options = new ChatCompletionsOptions(List.of(new ChatRequestUserMessage(prompt)));
-        options.setMaxTokens(600);
-        options.setTemperature(0.3);
-        return openAIClient.getChatCompletions(chatDeployment, options)
-                .getChoices().get(0).getMessage().getContent();
+        try {
+            return llmGateway.complete(prompt, 600, 0.3);
+        } catch (RuntimeException exception) {
+            return callLLMFallback(all, critical, overstocked, exception);
+        }
     }
 
     /** Fallback when the "llm" circuit breaker is open or the LLM call fails. */
@@ -113,7 +102,8 @@ public class InventoryAgent implements CommerceAgent {
                            List<InventoryDataTool.StockLevel> critical,
                            List<InventoryDataTool.StockLevel> overstocked,
                            Throwable t) {
-        log.warn("[InventoryAgent] LLM unavailable ({}), returning degraded summary", t.getMessage());
+        log.warn("[InventoryAgent] LLM unavailable ({}), returning degraded summary",
+                t.getClass().getSimpleName());
         return """
                 {"risks":[],"reorders":[],"clearance":[],"summary":"LLM unavailable — %d critical and %d overstocked SKUs require manual review."}
                 """.formatted(critical.size(), overstocked.size());
