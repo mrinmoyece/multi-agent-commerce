@@ -1,0 +1,39 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Staging overlay: production-like topology (2+ replicas, HPA, PDB) but pointed at
+# staging systems of record. Live adapters may be enabled here for pre-prod
+# validation once their endpoints/auth are configured in the staging secret store.
+namespace: commerce-staging
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/mrinmoyece/multi-agent-commerce
+    newName: ghcr.io/mrinmoyece/multi-agent-commerce
+    # Replace with the digest promoted from CI for staging (same digest is later
+    # promoted to prod — never rebuilt).
+    digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+
+patches:
+  - target:
+      kind: Deployment
+      name: multi-agent-commerce
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0/value
+        value: "staging"
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: multi-agent-commerce
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 2
+      - op: replace
+        path: /spec/maxReplicas
+        value: 4

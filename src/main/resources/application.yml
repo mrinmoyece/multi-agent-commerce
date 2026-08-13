@@ -54,6 +54,32 @@ retailer:
 runtime:
   tools:
     mode: ${RUNTIME_TOOLS_MODE:FIXTURE}
+    # Live production adapters (bound from runtime.tools.live.*) are used only when
+    # mode=LIVE. Nothing below has a production default: LiveAdapterValidator fails
+    # startup fast unless every endpoint URL/allowlist/deadline/size/pagination/
+    # freshness/auth is present and safe (HTTPS-only, host on its own allowlist).
+    # Supply all secrets from a secret manager — never commit them. Example shape:
+    #
+    # live:
+    #   inventory:
+    #     base-url: ${LIVE_INVENTORY_BASE_URL}        # https host, must be allow-listed
+    #     path: ${LIVE_INVENTORY_PATH}
+    #     allowed-hosts: ${LIVE_INVENTORY_ALLOWED_HOSTS}
+    #     system-of-record: ${LIVE_INVENTORY_SOR}     # description, not a secret
+    #     connect-timeout: ${LIVE_INVENTORY_CONNECT_TIMEOUT:2s}
+    #     read-timeout: ${LIVE_INVENTORY_READ_TIMEOUT:5s}
+    #     max-response-bytes: ${LIVE_INVENTORY_MAX_BYTES:65536}
+    #     page-size: ${LIVE_INVENTORY_PAGE_SIZE:100}
+    #     max-pages: ${LIVE_INVENTORY_MAX_PAGES:10}
+    #     max-staleness: ${LIVE_INVENTORY_MAX_STALENESS:15m}
+    #     auth:
+    #       type: ${LIVE_INVENTORY_AUTH_TYPE:OAUTH2_CLIENT_CREDENTIALS}  # or MTLS / API_KEY
+    #       token-url: ${LIVE_INVENTORY_TOKEN_URL}
+    #       client-id: ${LIVE_INVENTORY_CLIENT_ID}
+    #       client-secret: ${LIVE_INVENTORY_CLIENT_SECRET}
+    #       scope: ${LIVE_INVENTORY_SCOPE:}
+    #   pricing:   { ... same shape ... }
+    #   sentiment: { ... same shape ... }
   models:
     allowed-providers: ${RUNTIME_ALLOWED_PROVIDERS:azure-openai,github-models}
     allowed-models: ${RUNTIME_ALLOWED_MODELS:gpt-4o,gpt-4o-mini}

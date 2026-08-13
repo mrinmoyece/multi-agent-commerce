@@ -191,8 +191,12 @@ public final class RuntimeStep {
             ToolRequest request = new ToolRequest(tool.name(), ctx.retailerId(), Map.of(),
                     ctx.deadline(), com.agentforge.commerce.runtime.contract.RuntimeLimits.MAX_TOOL_PAYLOAD_BYTES);
             ToolResult<T> result = tool.fetch(request);
+            Instant now = clock.instant();
             telemetry.recordToolCall(tool.name(), result.status().name(),
-                    Duration.between(start, clock.instant()));
+                    Duration.between(start, now));
+            if (result.hasStaleEvidenceAt(now)) {
+                telemetry.recordStaleEvidence(tool.name());
+            }
             span.attribute("tool.status", result.status().name());
             span.attribute("tool.source_kind", result.source().kind().name());
             return result;

@@ -64,10 +64,24 @@ modes, approval waits) — never prompts, payloads or credentials.
 
 ## Database migrations
 
-Schema is owned by Flyway (`src/main/resources/db/migration`). Migrations run
-automatically on startup in every non-test profile (`ddl-auto=none`). Review new
-migrations before promotion; never edit an applied migration in place. Tests
-build the schema from the JPA model on H2 and keep it in step with the DDL.
+Schema is owned by Flyway (`src/main/resources/db/migration`; `V1`, `V2` today).
+`ddl-auto=none` in every non-test profile — the JPA model never mutates the schema.
+
+**Release strategy (expand/contract).** Every migration must be backward compatible
+with the currently running version so a rolling deploy is safe:
+
+1. *Expand* — add nullable columns/tables/indexes in one release; deploy code that
+   writes both old and new shapes.
+2. *Migrate* — backfill in a later release.
+3. *Contract* — drop the old column/constraint only once no running replica needs it.
+
+Never edit an applied migration in place; add a new versioned file. In Kubernetes a
+dedicated **migration Job** (`k8s/base/migration-job.yaml`, `--app.migrate-only=true`)
+applies migrations to completion and exits *before* the Deployment rolls, so replicas
+never race on schema changes. Locally/compose, migrations still run on startup. Tests
+validate the migrations from an empty database and across the upgrade path
+(`FlywayMigrationTest`, Testcontainers when Docker is present; a deterministic
+migration-ordering check runs even without Docker).
 
 ## Health and telemetry
 
@@ -77,36 +91,115 @@ build the schema from the JPA model on H2 and keep it in step with the DDL.
 - Prometheus: `http://localhost:8081/actuator/prometheus`
 
 Health details are never exposed. The management port must remain internal.
+SLIs/SLOs are defined in [SLO.md](SLO.md); dashboards and alert rules live under
+`observability/` (compose) and `k8s/base/{servicemonitor,prometheusrule}.yaml`
+(Operator). No run/retailer/tenant identifier is ever a metric label.
 
 ## Deploy
 
-1. Run `./gradlew check` and the security workflow.
-2. Build and scan the runtime image.
-3. Promote the exact image digest; do not deploy `latest`.
-4. Update the manifest image to that digest.
-5. Verify startup/readiness probes and one successful scheduled run.
+Manifests are Kustomize: `k8s/base` plus `k8s/overlays/{dev,staging,prod}`.
+
+1. Run `./gradlew clean check cyclonedxBom` and the release workflow gates.
+2. Build/sign/scan the multi-arch image once (see `.github/workflows/release.yml`).
+3. Apply the **migration Job** and wait for completion.
+4. Promote the exact signed image **digest** into the target overlay's
+   `images[].digest` — never a tag, never `latest`, never a rebuild between envs.
+5. `kubectl apply -k k8s/overlays/<env>` (or via GitOps).
+6. Verify readiness probes, signature/provenance (`cosign verify`), and one
+   successful scheduled run.
 
 ## Incident response
 
 For suspected credential exposure, revoke the provider key first, pause the
-schedule, preserve redacted logs and CI provenance, rotate Kubernetes secrets,
-and redeploy a known-good digest. For malformed briefings, inspect schema
+schedule, preserve redacted logs and CI provenance, rotate the External Secret
+source, and redeploy a known-good digest. For malformed briefings, inspect schema
 validation failures and provider status; never bypass validation to restore
-service.
+service. See `docs/adr/` and `docs/governance/INCIDENT_RESPONSE.md` for the full
+policy and severity ladder.
 
-## Scaling and secrets
+## Alert response
 
-The Deployment runs multiple replicas behind a rolling update. Duplicate work is
-prevented by the durable run's unique idempotency key plus a Redis lock, so
-scaling is horizontal and safe. Provision `multi-agent-commerce-secrets`
-(datasource URL/username/password, Redis password) and
-`multi-agent-commerce-config` (Redis host/port/ssl, OAuth issuer and audiences)
-from your secret manager before rollout — the manifests reference them and ship
-no default passwords.
+Each Prometheus alert links here via its `runbook_url`. First actions per alert:
+
+### api-down
+No healthy targets. Check pod status/events, recent deploy, node health. Roll back
+to the last known-good digest if a deploy correlates.
+
+### high-error-rate
+5xx over budget. Inspect logs for the failing endpoint, provider/DB health, and
+recent config. Consider pausing the schedule if runs amplify the errors.
+
+### api-latency
+p95 > 1.5s. Check DB pool saturation, provider latency, GC/CPU throttling, and HPA
+state. Scale out if CPU-bound.
+
+### run-failures
+Run failure ratio > 10%. Inspect `RUN_FAILED` audit reasons, provider availability,
+and circuit state. A single upstream outage usually explains a spike.
+
+### degraded-runs
+Agents degrading (schema/LLM/budget). Groundedness at risk — check provider health
+and recent prompt/model changes; consider reverting a prompt/eval release.
+
+### stale-evidence
+Tools returning evidence past its freshness window. Check the upstream system of
+record and adapter clock/freshness config; runs remain safe (stale flagged) but act
+before groundedness SLO burns.
+
+### approval-backlog
+Many runs `AWAITING_APPROVAL`. Page the approval on-call; verify the approvals API
+and that decisions are being recorded.
+
+### provider-latency
+Azure OpenAI p95 high. Check provider status page, region, and quota; expect run
+slowdowns. Budgets will hard-stop runs before cost runs away.
+
+### tool-errors
+An adapter is failing. Check adapter egress (NetworkPolicy), upstream health, and
+auth/token expiry. Sustained failures trip the circuit (see below).
+
+### circuit-open
+An adapter's circuit breaker has opened and is isolating the failing upstream.
+Confirm the upstream and auth; the circuit half-opens automatically — do not force
+it closed. Runs continue with that evidence marked degraded.
+
+### budget-exhaustion
+Frequent hard-stops. Review whether upstream latency inflated token/wall-clock use,
+or whether budgets need adjustment (change-managed).
+
+### queue-age
+Oldest PENDING run > 15m. The execution pool or all replicas may be stalled/blocked
+on the lock backend. Check Redis health, pool metrics, and replica readiness.
+
+## Backup, restore & disaster recovery
+
+**State of record is PostgreSQL.** Redis holds only ephemeral coordination
+(locks, rate limits, status cache); losing it is survivable.
+
+- **RPO ≤ 5 min, RTO ≤ 30 min** (targets).
+- **Backups:** managed PostgreSQL with point-in-time recovery (WAL archiving) and
+  automated daily base backups retained ≥ 14 days, plus weekly cross-region copies.
+  Verify restores monthly into a scratch database.
+- **Restore drill:** provision a new PostgreSQL, PITR to the target timestamp, point
+  a fresh overlay's datasource secret at it, run the migration Job (no-op if the
+  backup is current), then roll out the app at the last known-good digest.
+- **Redis loss:** in-flight locks/status vanish. The platform fails closed — a run
+  that cannot claim its lock is simply not executed by that replica, and the
+  idempotency key prevents duplicates when the schedule next fires. On Redis
+  recovery, coordination resumes with no manual step. If Redis is down at schedule
+  time, the run stays PENDING (watch the `queue-age` alert) and is claimed once
+  Redis returns.
+- **Disaster (region loss):** restore PostgreSQL cross-region, stand up the cluster
+  from the committed Kustomize overlays, reprovision secrets via External Secrets,
+  deploy the last signed digest, and verify one scheduled run. No application state
+  lives outside PostgreSQL and the manifests.
 
 ## Rollback
 
-Redeploy the last known-good image digest and configuration. Run state lives in
-PostgreSQL, so application rollback needs no data migration; only ever roll the
-database forward via Flyway. Confirm the pods report ready and one durable run
-per retailer/date is created.
+Redeploy the last known-good image **digest** (recorded in the release's
+`release-metadata.json` artifact) and its configuration. Run state lives in
+PostgreSQL, so app rollback needs no data migration — the expand/contract rule keeps
+one prior version compatible with the current schema. If a bad migration shipped,
+**forward-fix** with a new corrective migration rather than dropping columns under a
+running fleet. Confirm pods report ready and exactly one durable run per
+retailer/date is created.

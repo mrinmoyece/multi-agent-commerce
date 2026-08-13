@@ -276,6 +276,7 @@ org.testcontainers:jdbc:1.21.4=testCompileClasspath,testRuntimeClasspath
 org.testcontainers:junit-jupiter:1.20.6=testCompileClasspath,testRuntimeClasspath
 org.testcontainers:postgresql:1.20.6=testCompileClasspath,testRuntimeClasspath
 org.testcontainers:testcontainers:1.21.4=testCompileClasspath,testRuntimeClasspath
+org.wiremock:wiremock-standalone:3.9.2=testCompileClasspath,testRuntimeClasspath
 org.xmlresolver:xmlresolver:5.2.2=checkstyle
 org.xmlresolver:xmlresolver:5.3.3=spotbugs
 org.xmlunit:xmlunit-core:2.10.4=testCompileClasspath,testRuntimeClasspath

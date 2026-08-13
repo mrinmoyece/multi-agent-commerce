@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: multi-agent-commerce
+  labels:
+    app: multi-agent-commerce
+spec:
+  # Keep at least one replica serving during voluntary disruptions (node drains,
+  # upgrades). Works with replicas>=2 and maxUnavailable:0 rolling updates.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: multi-agent-commerce

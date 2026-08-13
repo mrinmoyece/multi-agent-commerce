@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Base manifests for the multi-agent-commerce API. Overlays (dev/staging/prod) set
+# the namespace, replica counts, resource envelopes and the immutable image digest.
+# The image digest below is a placeholder; overlays pin the real promoted digest.
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: multi-agent-commerce
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: true
+
+resources:
+  - serviceaccount.yaml
+  - configmap.yaml
+  - externalsecret.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+  - poddisruptionbudget.yaml
+  - hpa.yaml
+  - migration-job.yaml
+  - servicemonitor.yaml
+  - prometheusrule.yaml
+
+images:
+  - name: ghcr.io/mrinmoyece/multi-agent-commerce
+    newName: ghcr.io/mrinmoyece/multi-agent-commerce
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

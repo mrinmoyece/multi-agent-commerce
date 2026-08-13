@@ -60,8 +60,10 @@ AgentMessage.builder()
 - Temperature for coordinator synthesis: 0.6 (cross-domain insight generation)
 
 ## Scheduling
-Daily briefing runs via `@Scheduled(cron="${briefing.cron}")` in AgentCoordinator.
-There is no HTTP trigger in the current application.
+Daily briefing runs via `@Scheduled(cron="${briefing.cron}")` in `AgentCoordinator`
+and can also be triggered on demand through the REST API
+(`POST /api/v1/analysis-runs` with a bearer JWT). Either path creates one durable
+run per retailer/date, executed exactly once across replicas.
 
 ## PR Standards
 - [ ] New agent implements CommerceAgent interface
@@ -119,3 +121,40 @@ Any change to runtime behaviour must keep the offline eval gate green:
 - [ ] Memory writes are evidence-backed and retailer-scoped
 - [ ] `./gradlew clean check` (incl. `evalGate`) and `cyclonedxBom` pass
 - [ ] Eval baseline regenerated in-PR if behaviour intentionally changed
+
+## Layer 3 — Production operations (authoritative for ops/deploy work)
+
+- **Live adapters go through the hardened substrate.** New external calls for
+  inventory/pricing/sentiment must use `runtime.tools.live.http` — never a raw
+  `HttpClient`/URL fetch. Preserve HTTPS-only, the host allowlist (no SSRF),
+  bounded sizes/deadlines, schema validation, retry + circuit breaker, correlation
+  IDs, provenance/freshness and secret-safe logging. LIVE mode must **fail fast**
+  on missing/invalid endpoint or auth config — never add a fake production default.
+  Every LIVE code path needs a deterministic WireMock contract test.
+- **No high-cardinality metric labels.** Run/retailer/tenant/correlation IDs may
+  appear on trace spans only. Add metrics through `RuntimeTelemetry`; the
+  `MetricsConfig` MeterFilter will strip forbidden tag keys — do not defeat it.
+- **Metrics ↔ alerts ↔ runbook stay in sync.** New/renamed metrics must update
+  `observability/alert-rules.yml` + `k8s/base/prometheusrule.yaml` (keep them
+  identical) and add a matching `### <alert>` anchor in `docs/RUNBOOK.md`. SLIs
+  live in `docs/SLO.md`.
+- **Exactly-once is sacred.** Anything scheduled/durable must claim work via
+  `DistributedLock` + optimistic status transition and **fail closed** if the lock
+  backend is unavailable. HPA/replicas must never be able to duplicate a run;
+  cover it in `perfGate`/`resilienceGate`.
+- **Kubernetes is Kustomize.** Change `k8s/base` and let overlays
+  (`k8s/overlays/{dev,staging,prod}`) patch. Images are promoted by **digest**,
+  never tag. Validate with `kubectl kustomize k8s/overlays/<env>` + `kubeconform`.
+  Migrations run via the pre-roll Job and must be expand/contract (rolling-safe).
+- **Gates only get stronger.** `perfGate` and `resilienceGate` run under `check`.
+  Keep them deterministic/offline; never lower a budget/threshold to pass.
+- **Governance is part of the change.** Decisions that alter long-lived constraints
+  get an ADR (`docs/adr/`); operational policy changes update `docs/governance/`.
+
+### Layer 3 PR Standards
+- [ ] Live adapter changes go through the hardened substrate with a WireMock contract test
+- [ ] No run/tenant/correlation IDs added as metric labels
+- [ ] Metric/alert/runbook/SLO docs updated and kept in sync
+- [ ] `kubectl kustomize` + `kubeconform` pass for all overlays; migrations expand/contract
+- [ ] `./gradlew clean check` (incl. `evalGate`, `perfGate`, `resilienceGate`) and `cyclonedxBom` pass
+- [ ] ADR/governance docs updated when a long-lived constraint or policy changes

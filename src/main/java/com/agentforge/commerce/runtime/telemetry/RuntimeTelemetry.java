@@ -34,8 +34,8 @@ public class RuntimeTelemetry {
      */
     public RuntimeSpan runSpan(String runId, String retailerId) {
         Observation obs = Observation.createNotStarted("agent.run", observations)
-                .lowCardinalityKeyValue("run.id", safe(runId))
-                .lowCardinalityKeyValue("retailer.id", safe(retailerId));
+                .highCardinalityKeyValue("run.id", safe(runId))
+                .highCardinalityKeyValue("retailer.id", safe(retailerId));
         return new RuntimeSpan(obs.start());
     }
 
@@ -44,7 +44,7 @@ public class RuntimeTelemetry {
      */
     public RuntimeSpan agentSpan(String runId, String agentName) {
         Observation obs = Observation.createNotStarted("agent.execute", observations)
-                .lowCardinalityKeyValue("run.id", safe(runId))
+                .highCardinalityKeyValue("run.id", safe(runId))
                 .lowCardinalityKeyValue("agent.name", safe(agentName));
         return new RuntimeSpan(obs.start());
     }
@@ -102,12 +102,46 @@ public class RuntimeTelemetry {
         meters.counter("runtime.circuit.state", Tags.of("circuit", safe(circuit), "state", safe(state))).increment();
     }
 
-    public void recordApprovalWait(String runId) {
-        meters.counter("runtime.approval.wait", Tags.of("run.id", safe(runId))).increment();
+    /**
+     * Terminal outcome of a run. {@code outcome} is bounded (success, failed,
+     * awaiting_approval) so it is safe as a metric label and drives the run-success SLI.
+     */
+    public void recordRunOutcome(String outcome) {
+        meters.counter("runtime.run.completed", Tags.of("outcome", safe(outcome))).increment();
     }
 
+    /**
+     * A grounded tool returned evidence that is stale at read time. {@code toolName}
+     * is bounded (a fixed set of tools) so it is safe as a metric label.
+     */
+    public void recordStaleEvidence(String toolName) {
+        meters.counter("runtime.evidence.stale", Tags.of("tool.name", safe(toolName))).increment();
+    }
+
+    /**
+     * Records that a run is blocked awaiting human approval. The run identifier is
+     * deliberately NOT a metric label (it is unbounded); it is emitted on the active
+     * trace span instead so the counter stays low-cardinality.
+     */
+    public void recordApprovalWait(String runId) {
+        markCurrentSpan("run.id", runId);
+        meters.counter("runtime.approval.wait").increment();
+    }
+
+    /**
+     * Records a budget hard-stop. Only the bounded {@code dimension} (e.g. tokens,
+     * cost, wall-clock) is a metric label; the run identifier goes to the trace span.
+     */
     public void recordBudgetStop(String runId, String dimension) {
-        meters.counter("runtime.budget.stop", Tags.of("run.id", safe(runId), "dimension", safe(dimension))).increment();
+        markCurrentSpan("run.id", runId);
+        meters.counter("runtime.budget.stop", Tags.of("dimension", safe(dimension))).increment();
+    }
+
+    private void markCurrentSpan(String key, String value) {
+        Observation current = observations.getCurrentObservation();
+        if (current != null) {
+            current.highCardinalityKeyValue(key, safe(value));
+        }
     }
 
     private static String safe(String value) {

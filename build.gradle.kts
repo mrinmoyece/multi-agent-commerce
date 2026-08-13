@@ -34,6 +34,7 @@ val resilience4jVersion = "2.4.0"
 extra["commons-lang3.version"] = "3.20.0"
 
 val testcontainersVersion = "1.20.6"
+val wiremockVersion = "3.9.2"
 
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-web")
@@ -83,11 +84,20 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:junit-jupiter:$testcontainersVersion")
     testImplementation("org.testcontainers:postgresql:$testcontainersVersion")
+
+    // ── Deterministic mock HTTP server for live-adapter contract tests ──
+    // Standalone (shaded) build avoids Jetty/Jackson version clashes with Spring Boot.
+    testImplementation("org.wiremock:wiremock-standalone:$wiremockVersion")
 }
 
 tasks.withType<Test> {
     useJUnitPlatform()
-    jvmArgs("-XX:+EnableDynamicAgentLoading")
+    // The second flag is test-only: WireMock's self-signed TLS cert is not issued
+    // for "localhost", and the JDK HttpClient reads this property once at startup.
+    // It relaxes hostname verification for the in-JVM mock server in the live-adapter
+    // contract tests; production adapter clients use real trust stores and are
+    // unaffected (the flag is never set outside the test JVM).
+    jvmArgs("-XX:+EnableDynamicAgentLoading", "-Djdk.internal.httpclient.disableHostnameVerification=true")
 }
 
 tasks.named<BootJar>("bootJar") {
@@ -147,6 +157,8 @@ tasks.jacocoTestCoverageVerification {
 tasks.check {
     dependsOn(tasks.jacocoTestCoverageVerification)
     dependsOn("evalGate")
+    dependsOn("perfGate")
+    dependsOn("resilienceGate")
 }
 
 val evalSmoke = tasks.register<JavaExec>("evalSmoke") {
@@ -169,6 +181,42 @@ tasks.register<JavaExec>("evalGate") {
     } else {
         args("gate")
     }
+}
+
+tasks.register<JavaExec>("perfSmoke") {
+    group = "verification"
+    description = "Runs the fast offline performance/concurrency smoke subset."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.agentforge.commerce.perf.PerfRunner")
+    args("smoke")
+}
+
+tasks.register<JavaExec>("perfGate") {
+    group = "verification"
+    description = "Runs the full offline performance/concurrency gate with explicit budgets."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.agentforge.commerce.perf.PerfRunner")
+    args("gate")
+}
+
+tasks.register<JavaExec>("resilienceSmoke") {
+    group = "verification"
+    description = "Runs the fast offline resilience/chaos smoke subset."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.agentforge.commerce.resilience.ResilienceRunner")
+    args("smoke")
+}
+
+tasks.register<JavaExec>("resilienceGate") {
+    group = "verification"
+    description = "Runs the full offline resilience/chaos gate asserting documented fault behaviour."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.agentforge.commerce.resilience.ResilienceRunner")
+    args("gate")
 }
 
 dependencyLocking {

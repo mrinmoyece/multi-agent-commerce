@@ -71,12 +71,63 @@
   byte-stable report, and enforces a committed baseline with drift detection via
   `./gradlew evalSmoke` / `evalGate` (wired into `check` and a CI merge gate).
 
+### Added — Layer 3 (production operations)
+
+- **Concrete LIVE HTTP adapters** for WMS inventory, competitor pricing and
+  customer sentiment behind the Layer 2 contracts, on one hardened client
+  (`runtime.tools.live.http`): HTTPS-only, host allowlist (no arbitrary
+  fetch/SSRF), bounded request/response sizes, connect/read deadlines, mTLS/OAuth2
+  client-credentials where configured, pagination limits, strict schema
+  validation, per-adapter resilience4j retry + circuit breaker, correlation-ID
+  propagation, evidence provenance/freshness, and secret-safe errors/logging.
+  `runtime.tools.mode=LIVE` **fails fast at startup** unless every required
+  endpoint/auth setting is valid — no fake production defaults. Deterministic
+  WireMock **contract tests** cover success, auth, timeout, oversized payload,
+  malformed schema, partial pagination, stale evidence, retry, circuit-open and
+  forbidden-host.
+- **Kubernetes productionization** via Kustomize `k8s/base` + `k8s/overlays/{dev,
+  staging,prod}`: immutable image-digest promotion, External Secrets/workload
+  identity examples, a default-deny **NetworkPolicy** covering API ingress,
+  management scrape, DNS, PostgreSQL, Redis and HTTPS adapter/provider egress
+  (RFC-1918 + link-local/metadata blocked), Pod Security restricted, topology
+  spread + anti-affinity, PodDisruptionBudget and HPA (safe under exactly-once
+  execution), resource limits, graceful shutdown, a pre-roll Flyway **migration
+  Job** (`--app.migrate-only=true`), a ServiceMonitor and PrometheusRule.
+- **Observability assets**: SLO/SLI definitions (`docs/SLO.md`), a Grafana
+  dashboard and Prometheus alert rules with runbook-linked annotations
+  (`observability/`). New metrics (`runtime.run.completed`,
+  `runtime.evidence.stale`, `runtime.run.queue.age.seconds`) plus a **MeterFilter**
+  guaranteeing run/retailer/tenant/correlation IDs never become metric labels
+  (they remain on trace spans only).
+- **Deterministic performance and resilience gates** (`perfGate`,
+  `resilienceGate`, plus `perfSmoke`/`resilienceSmoke`) wired into `check` and CI:
+  API latency budget, concurrent durable-claim/no-duplicates, provider throttling
+  recovery, partial tool outage/circuit opening, coordination outage fail-closed,
+  deadline honouring and graceful-shutdown drain.
+- **Flyway migration validation** (`FlywayMigrationTest`): a deterministic
+  ordering/non-destructive guard that runs everywhere, plus a Testcontainers
+  empty-DB + idempotent-upgrade check when Docker is present.
+- **Secure release workflow** (`.github/workflows/release.yml`): immutable GHCR
+  multi-arch images, build provenance attestation, keyless Sigstore/Cosign
+  signing, CycloneDX SBOM, vulnerability scan, environment protection/deployment
+  gates, promotion by digest and rollback metadata. Every Action is SHA-pinned and
+  job permissions are minimized.
+- **Operational governance**: Architecture Decision Records (`docs/adr/`) for
+  durable orchestration, memory trust, HITL policy, eval strategy, live adapter
+  trust boundary and singleton-vs-horizontal execution; and governance docs
+  (`docs/governance/`) for data retention/privacy classification, tenant isolation
+  verification, incident response, model/provider change management, prompt/eval
+  release process and on-call playbooks. The RUNBOOK adds backup/restore, disaster
+  recovery (RPO ≤ 5 min / RTO ≤ 30 min), Redis-loss behaviour, rollback and
+  forward-fix procedures, and per-alert response steps.
+
 ### Changed
 
-- Docker Compose now provisions PostgreSQL and Redis; Kubernetes manifests scale
-  to a rolling-updated multi-replica Deployment and source all connection
-  secrets/config from an externally-managed Secret and ConfigMap (no default
-  passwords). `.env.example` and the docs were updated accordingly.
+- Docker Compose now provisions PostgreSQL and Redis; Kubernetes manifests are
+  Kustomize (base + dev/staging/prod overlays) scaling to a rolling-updated
+  multi-replica Deployment that sources all connection secrets/config from an
+  externally-managed Secret/ConfigMap and External Secrets (no default passwords).
+  `.env.example` and the docs were updated accordingly.
 - Hardened LLM configuration, transport, retries, response bounds, and
   fail-closed briefing validation.
 - Added blocking quality, coverage, dependency, secret, container, SBOM, and

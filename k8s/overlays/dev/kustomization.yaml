@@ -1,0 +1,51 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Development overlay: single namespace, fixture grounding (no live systems of
+# record), minimal footprint. HPA is scaled down to 1-2 replicas.
+namespace: commerce-dev
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/mrinmoyece/multi-agent-commerce
+    newName: ghcr.io/mrinmoyece/multi-agent-commerce
+    # Replace with the digest promoted from CI for the dev environment.
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+
+patches:
+  - target:
+      kind: Deployment
+      name: multi-agent-commerce
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0/value
+        value: "dev"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: RUNTIME_TOOLS_MODE
+          value: "FIXTURE"
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: multi-agent-commerce
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 2
+  - target:
+      kind: PodDisruptionBudget
+      name: multi-agent-commerce
+    patch: |-
+      - op: remove
+        path: /spec/minAvailable
+      - op: add
+        path: /spec/maxUnavailable
+        value: 1

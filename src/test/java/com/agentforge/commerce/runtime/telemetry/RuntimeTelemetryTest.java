@@ -55,8 +55,11 @@ class RuntimeTelemetryTest {
         telemetry.recordBudgetStop("run-1", "tokens");
         assertThat(meters.counter("runtime.degraded", "agent.name", "InventoryAgent", "reason", "schema_invalid")
                 .count()).isEqualTo(1);
-        assertThat(meters.counter("runtime.budget.stop", "run.id", "run-1", "dimension", "tokens").count())
-                .isEqualTo(1);
-        assertThat(meters.counter("runtime.approval.wait", "run.id", "run-1").count()).isEqualTo(1);
+        // run.id is deliberately NOT a metric label (unbounded cardinality); the
+        // counters carry only bounded dimensions and the run id goes to the span.
+        assertThat(meters.counter("runtime.budget.stop", "dimension", "tokens").count()).isEqualTo(1);
+        assertThat(meters.counter("runtime.approval.wait").count()).isEqualTo(1);
+        assertThat(meters.get("runtime.budget.stop").counter().getId().getTag("run.id")).isNull();
+        assertThat(meters.get("runtime.approval.wait").counter().getId().getTag("run.id")).isNull();
     }
 }

@@ -1,0 +1,87 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: multi-agent-commerce-migrate
+  labels:
+    app: multi-agent-commerce
+    app.kubernetes.io/component: migration
+  annotations:
+    # The release pipeline applies this Job and waits for completion BEFORE the
+    # Deployment rollout, so the schema is known-good first. Migrations must be
+    # backward compatible (expand/contract) with the currently running version.
+    kubernetes.io/description: "Runs Flyway migrations to completion, then exits."
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: multi-agent-commerce
+        app.kubernetes.io/component: migration
+    spec:
+      serviceAccountName: multi-agent-commerce
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/mrinmoyece/multi-agent-commerce@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          args: ["--app.migrate-only=true"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "prod"
+            # Migration touches only the database: Redis, the LLM provider and the
+            # live adapters are disabled so the Job has no other dependencies.
+            - name: PLATFORM_REDIS_ENABLED
+              value: "false"
+            - name: RUNTIME_TOOLS_MODE
+              value: "FIXTURE"
+            # A non-blank placeholder key lets the provider client be constructed
+            # (no network call happens at build time); it is never used because the
+            # process exits right after migrations complete.
+            - name: LLM_PROVIDER
+              value: "github-models"
+            - name: LLM_API_KEY
+              value: "migration-only-noop"
+            - name: SPRING_DATASOURCE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: datasource-url
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: datasource-username
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: datasource-password
+          resources:
+            requests:
+              memory: "384Mi"
+              cpu: "250m"
+            limits:
+              memory: "768Mi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi

@@ -1,0 +1,102 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# NetworkPolicies for the API pods. The model is default-deny (both directions)
+# plus explicit allow rules. Namespace selectors use the built-in immutable label
+# `kubernetes.io/metadata.name`; adjust the namespace names per cluster in overlays.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: multi-agent-commerce-default-deny
+  labels:
+    app: multi-agent-commerce
+spec:
+  podSelector:
+    matchLabels:
+      app: multi-agent-commerce
+  policyTypes: [Ingress, Egress]
+  # No ingress/egress rules => deny all; the policies below re-open only what is needed.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: multi-agent-commerce-ingress-api
+  labels:
+    app: multi-agent-commerce
+spec:
+  podSelector:
+    matchLabels:
+      app: multi-agent-commerce
+  policyTypes: [Ingress]
+  ingress:
+    # Public API traffic only from the ingress controller namespace, port 8080.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Prometheus (monitoring namespace) scrapes the management port 8081 only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8081
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: multi-agent-commerce-egress
+  labels:
+    app: multi-agent-commerce
+spec:
+  podSelector:
+    matchLabels:
+      app: multi-agent-commerce
+  policyTypes: [Egress]
+  egress:
+    # Cluster DNS.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # PostgreSQL — reached only in the data namespace on 5432.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Redis — reached only in the data namespace on 6379.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data
+      ports:
+        - protocol: TCP
+          port: 6379
+    # HTTPS egress to external systems: Azure OpenAI, the three production
+    # adapters (WMS / competitor pricing / sentiment) and the OIDC issuer.
+    # Restricted to public routable space; RFC-1918 ranges and the cloud
+    # instance-metadata endpoint are excluded to block SSRF pivots. Tighten to
+    # explicit provider CIDRs per environment where the provider publishes them.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443

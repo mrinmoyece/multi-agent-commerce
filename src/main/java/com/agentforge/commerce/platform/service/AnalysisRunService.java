@@ -240,9 +240,11 @@ public class AnalysisRunService {
 
         if (target == RunStatus.AWAITING_APPROVAL) {
             telemetry.recordApprovalWait(runId.toString());
+            telemetry.recordRunOutcome("awaiting_approval");
             auditService.record("RUN_AWAITING_APPROVAL", runId, run.getRequestedBy(),
                     "reasons=" + String.join(",", decision.reasons()));
         } else {
+            telemetry.recordRunOutcome("success");
             auditService.record("RUN_SUCCEEDED", runId, run.getRequestedBy(),
                     "actions=" + safeSize(briefing.getRecommendedActions()));
         }
@@ -326,6 +328,7 @@ public class AnalysisRunService {
         run.setCompletedAt(Instant.now());
         run.setUpdatedAt(Instant.now());
         AnalysisRunEntity saved = runRepository.save(run);
+        telemetry.recordRunOutcome("failed");
         auditService.record("RUN_FAILED", runId, run.getRequestedBy(), truncateReason(reason));
         cacheStatus(saved);
         return saved;

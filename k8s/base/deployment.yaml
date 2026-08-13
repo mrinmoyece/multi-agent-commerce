@@ -4,11 +4,15 @@ metadata:
   name: multi-agent-commerce
   labels:
     app: multi-agent-commerce
+    app.kubernetes.io/name: multi-agent-commerce
+    app.kubernetes.io/component: api
 spec:
   # Distributed coordination (Redis locks + durable Postgres run store) means a
-  # scheduled run is created once and executed exactly once across replicas, so
-  # the app is now safe to run as a horizontally-scaled, rolling-updated Deployment.
+  # scheduled run is created once (retailer+date idempotency key) and executed
+  # exactly once across replicas, so the app is safe to run horizontally scaled
+  # and rolling-updated. Do NOT relax that coordination when changing replicas.
   replicas: 2
+  revisionHistoryLimit: 5
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -21,13 +25,14 @@ spec:
     metadata:
       labels:
         app: multi-agent-commerce
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/path: "/actuator/prometheus"
-        prometheus.io/port: "8081"
+        app.kubernetes.io/name: multi-agent-commerce
+        app.kubernetes.io/component: api
     spec:
+      serviceAccountName: multi-agent-commerce
+      # Token is projected explicitly by the workload-identity webhook / ESO; it is
+      # not blanket-mounted into every container.
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -35,10 +40,35 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      # Spread across zones first, then hosts, so a zone or node loss cannot take
+      # out the whole Deployment. Combined with anti-affinity below.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: multi-agent-commerce
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: multi-agent-commerce
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: multi-agent-commerce
       containers:
         - name: multi-agent-commerce
-          # Release automation must replace this version tag with the promoted digest.
-          image: ghcr.io/mrinmoyece/multi-agent-commerce:1.0.0
+          # Release automation replaces this with an immutable digest via the
+          # kustomize `images:` transformer (see overlays). Never deploy a tag.
+          image: ghcr.io/mrinmoyece/multi-agent-commerce@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -66,8 +96,6 @@ spec:
                   name: multi-agent-commerce-secrets
                   key: azure-openai-endpoint
             # ── Persistence (PostgreSQL) ──────────────────────────────────
-            # Connection details come from an externally-managed Secret; no
-            # credentials are baked into this manifest or the image.
             - name: SPRING_DATASOURCE_URL
               valueFrom:
                 secretKeyRef:
@@ -107,7 +135,6 @@ spec:
                   name: multi-agent-commerce-secrets
                   key: redis-password
             # ── OAuth2 resource server ────────────────────────────────────
-            # Issuer + audience are non-secret and live in the ConfigMap.
             - name: SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
               valueFrom:
                 configMapKeyRef:
@@ -134,6 +161,12 @@ spec:
               path: /actuator/health/liveness
               port: management
             periodSeconds: 30
+          lifecycle:
+            preStop:
+              # Give the ingress/endpoints controllers time to stop routing to this
+              # pod before Spring's graceful shutdown drains in-flight work.
+              exec:
+                command: ["sh", "-c", "sleep 8"]
           resources:
             requests:
               memory: "512Mi"
@@ -148,90 +181,3 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: multi-agent-commerce
-spec:
-  selector:
-    app: multi-agent-commerce
-  ports:
-    - protocol: TCP
-      port: 80
-      targetPort: 8080
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: multi-agent-commerce
-spec:
-  podSelector:
-    matchLabels:
-      app: multi-agent-commerce
-  policyTypes: [Ingress, Egress]
-  ingress:
-    - from:
-        - namespaceSelector: {}
-      ports:
-        - protocol: TCP
-          port: 8080
-        - protocol: TCP
-          port: 8081
-  egress:
-    - to:
-        - namespaceSelector: {}
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
-    # PostgreSQL and Redis are reached in-cluster; allow just those ports.
-    - to:
-        - namespaceSelector: {}
-      ports:
-        - protocol: TCP
-          port: 5432
-        - protocol: TCP
-          port: 6379
-    - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 172.16.0.0/12
-              - 192.168.0.0/16
-              - 169.254.169.254/32
-      ports:
-        - protocol: TCP
-          port: 443
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: multi-agent-commerce
-spec:
-  maxUnavailable: 1
-  selector:
-    matchLabels:
-      app: multi-agent-commerce
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: multi-agent-commerce-config
-  labels:
-    app: multi-agent-commerce
-# Non-secret runtime configuration. Connection secrets (datasource URL/username/
-# password, redis password, LLM key, Azure endpoint) live in the externally
-# managed Secret `multi-agent-commerce-secrets` and are NEVER committed here.
-data:
-  redis-host: "redis.commerce.svc.cluster.local"
-  redis-port: "6379"
-  redis-ssl: "false"
-  # Replace with the real OIDC issuer and the API's accepted audience(s).
-  oauth2-issuer-uri: "https://login.example.com/tenant"
-  oauth2-audiences: "api://multi-agent-commerce"

@@ -97,8 +97,9 @@ in outerwear.
 | API & security | Versioned REST API under `/api/v1`; OAuth2/OIDC JWT resource server with scope/role method security and RFC 9457 Problem Details |
 | Resilience | Resilience4j circuit breaker + retry, 30-second transport timeout, bounded LLM responses |
 | Scheduling | `DailyAnalysisScheduler` creates one durable run per retailer/date (cron `briefing.cron`, default `0 0 6 * * *`); it is executed exactly once across replicas via a Redis lock + optimistic-locking state machine |
-| Observability | Micrometer + Prometheus on the internal management port (`8081`), structured JSON logging |
-| Supply chain | Dependency locks/checksums, CycloneDX SBOM, Trivy, pinned Actions and container bases |
+| Observability | Micrometer + Prometheus on the internal management port (`8081`), structured JSON logging, Grafana dashboard + alert rules, SLOs; run/tenant IDs never used as metric labels |
+| Supply chain | Dependency locks/checksums, CycloneDX SBOM, Trivy, keyless Cosign signing + build provenance, pinned Actions and container bases |
+| Deployment | Kustomize base + dev/staging/prod overlays, digest-pinned images, External Secrets, default-deny NetworkPolicy, Pod Security restricted, PDB/HPA, pre-roll Flyway migration Job |
 
 ## Simulated Data & Current Limitations
 
@@ -131,10 +132,30 @@ injection-fenced, every output is strict-schema validated (fail-closed), per-run
 token/request/latency/cost **budgets** are hard-stopped before provider calls,
 and high-impact actions pause for **human-in-the-loop** approval. Grounding runs
 on deterministic **fixtures by default** (`runtime.tools.mode=FIXTURE`) — always
-labelled non-authoritative, never presented as live — with **live adapter
-contracts** ready for production feeds. Durable, retailer-scoped semantic memory
-stores only evidence-backed facts with hard tenant isolation. See
-[ARCHITECTURE.md](docs/ARCHITECTURE.md) and [LIMITATIONS.md](docs/LIMITATIONS.md).
+labelled non-authoritative, never presented as live — with hardened **live
+adapters** ready for production feeds (`runtime.tools.mode=LIVE`, Layer 3).
+Durable, retailer-scoped semantic memory stores only evidence-backed facts with
+hard tenant isolation. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+[LIMITATIONS.md](docs/LIMITATIONS.md).
+
+### Layer 3 — production operations
+
+Layer 3 makes the platform deployable and operable. Concrete **LIVE HTTP
+adapters** for WMS inventory, competitor pricing and customer sentiment sit behind
+the Layer 2 contracts on one hardened client: HTTPS-only, host allowlist (no SSRF),
+bounded sizes/deadlines, mTLS/OAuth2 where configured, pagination limits, schema
+validation, per-adapter retry + circuit breaker, correlation IDs, evidence
+provenance/freshness, and secret-safe logging. LIVE mode **fails fast** unless
+every endpoint/auth setting is valid — no fake defaults — and is covered by
+deterministic WireMock contract tests. Kubernetes ships as **Kustomize** base +
+dev/staging/prod overlays with digest-pinned images, External Secrets/workload
+identity, a default-deny **NetworkPolicy**, Pod Security restricted, PDB/HPA,
+topology spread, graceful shutdown, and a pre-roll migration Job. Observability
+adds **SLOs**, a Grafana dashboard and Prometheus alerts (no high-cardinality
+labels); deterministic **`perfGate`** and **`resilienceGate`** join `check`; and a
+signed, multi-arch, provenance-attested **release workflow** promotes images by
+digest. See the [ADRs](docs/adr/README.md), [governance](docs/governance/README.md),
+[SLOs](docs/SLO.md) and the [runbook](docs/RUNBOOK.md) DR/backup/rollback sections.
 
 ## Quick Start
 
@@ -173,10 +194,11 @@ via environment variables / Kubernetes Secret and ConfigMap — see the
 ./gradlew check
 ```
 
-`check` runs tests, the 70% line-coverage gate, Checkstyle, SpotBugs, and the
-**offline agentic evaluation gate** (`evalGate`). CI also scans dependencies and
-repository history, emits a CycloneDX SBOM, scans the runtime image, and runs
-CodeQL.
+`check` runs tests, the 70% line-coverage gate, Checkstyle, SpotBugs, the
+**offline agentic evaluation gate** (`evalGate`), and the deterministic
+**performance** (`perfGate`) and **resilience** (`resilienceGate`) gates. CI also
+scans dependencies and repository history, emits a CycloneDX SBOM, scans the
+runtime image, and runs CodeQL.
 
 The evaluation gate is deterministic and offline. Run the fast subset with
 `./gradlew evalSmoke` or the full gate with `./gradlew evalGate`; it scores eight
@@ -190,13 +212,22 @@ or drift from the committed baseline (`eval/baseline/eval-report.json`).
 
 - Application traffic uses port `8080`; health and metrics use the internal
   management port `8081`.
-- The production manifest runs multiple replicas behind a rolling update.
-  Duplicate daily briefings are prevented by a durable per-retailer/date
-  idempotency key plus a Redis lock, so the workload scales horizontally.
+- Kubernetes manifests are Kustomize (`k8s/base` + `k8s/overlays/{dev,staging,
+  prod}`). Multiple replicas run behind a rolling update; duplicate daily
+  briefings are prevented by a durable per-retailer/date idempotency key plus a
+  Redis lock, so the workload scales horizontally (HPA/PDB safe).
 - Containers run as UID `10001`, without Linux capabilities or service-account
-  credentials, with a read-only root filesystem in Kubernetes.
+  credentials, with a read-only root filesystem under Pod Security restricted; a
+  default-deny NetworkPolicy allows only DNS, PostgreSQL, Redis, management scrape
+  and HTTPS egress (private/metadata ranges blocked).
 - LLM output is bounded and validated. Coordinator synthesis fails closed if it
   does not match the briefing JSON schema.
+- Releases are signed multi-arch images with build provenance and an SBOM,
+  promoted between environments by immutable digest. SLOs, dashboards, alerts and
+  DR/backup/rollback procedures are documented for operators.
 
 See the [documentation map](docs/README.md), [runbook](docs/RUNBOOK.md),
-[security model](docs/SECURITY_MODEL.md), and [known limitations](docs/LIMITATIONS.md).
+[SLOs](docs/SLO.md), [security model](docs/SECURITY_MODEL.md),
+[architecture decisions](docs/adr/README.md),
+[operational governance](docs/governance/README.md), and
+[known limitations](docs/LIMITATIONS.md).
