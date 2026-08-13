@@ -15,6 +15,14 @@ permissions:
 env:
   JAVA_VERSION: "21"
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/multi-agent-commerce
+  # Pinned, checksum-verified Trivy. Installed directly from the release asset
+  # rather than via aquasecurity/setup-trivy, whose bundled installer pulls
+  # contrib/install.sh from trivy@main and fails intermittently on shared runners.
+  TRIVY_VERSION: "0.73.0"
+  # High-availability mirrors so vulnerability DB pulls avoid anonymous
+  # GHCR/Docker Hub rate limits.
+  TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2
+  TRIVY_JAVA_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-java-db:1
 
 jobs:
   test:
@@ -141,21 +149,22 @@ jobs:
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      - name: Install Trivy (pinned, checksum-verified)
+        run: |
+          set -euo pipefail
+          asset="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors -o "${asset}" "${base}/${asset}"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors -o trivy_checksums.txt "${base}/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep " ${asset}\$" trivy_checksums.txt | sha256sum -c -
+          tar -xzf "${asset}" trivy
+          sudo install -m 0755 trivy /usr/local/bin/trivy
+          rm -f trivy "${asset}" trivy_checksums.txt
+          trivy --version
       - name: Scan dependencies and configuration
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-        env:
-          # Authenticate binary/DB resolution so the install and DB pull do not
-          # hit anonymous GitHub/registry rate limits on shared runners.
-          GITHUB_TOKEN: ${{ github.token }}
-          TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2
-          TRIVY_JAVA_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-java-db:1
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,misconfig
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
+        run: |
+          trivy fs --scanners vuln,misconfig --severity CRITICAL,HIGH \
+            --ignore-unfixed --exit-code 1 --no-progress .
       - name: Generate CycloneDX SBOM
         run: ./gradlew cyclonedxBom --no-daemon
       - name: Upload security artifacts
@@ -181,18 +190,22 @@ jobs:
             --tag "${IMAGE_NAME}:${GITHUB_SHA}" .
       - name: Verify non-root runtime
         run: test "$(docker run --rm --entrypoint id "${IMAGE_NAME}:${GITHUB_SHA}" -u)" != "0"
+      - name: Install Trivy (pinned, checksum-verified)
+        run: |
+          set -euo pipefail
+          asset="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors -o "${asset}" "${base}/${asset}"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors -o trivy_checksums.txt "${base}/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep " ${asset}\$" trivy_checksums.txt | sha256sum -c -
+          tar -xzf "${asset}" trivy
+          sudo install -m 0755 trivy /usr/local/bin/trivy
+          rm -f trivy "${asset}" trivy_checksums.txt
+          trivy --version
       - name: Scan runtime image
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2
-          TRIVY_JAVA_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-java-db:1
-        with:
-          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
-          format: table
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
+        run: |
+          trivy image --severity CRITICAL,HIGH --ignore-unfixed \
+            --exit-code 1 --no-progress "${IMAGE_NAME}:${GITHUB_SHA}"
 
   publish:
     name: Publish Image

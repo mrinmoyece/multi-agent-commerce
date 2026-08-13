@@ -33,6 +33,13 @@ val azureOpenAiVersion = "1.0.0-beta.16"
 val resilience4jVersion = "2.4.0"
 extra["commons-lang3.version"] = "3.20.0"
 
+// ── Security dependency floors (override Spring Boot-managed versions) ──
+// Pin patched releases of shipped transitives to clear known HIGH advisories
+// surfaced by the Trivy vulnerability gate. All are drop-in patch/minor bumps
+// on the versions Spring Boot's BOM would otherwise select.
+extra["netty.version"] = "4.1.136.Final"      // CVE-2026-55831/55833/56745/56819/59901
+extra["postgresql.version"] = "42.7.12"        // CVE-2026-54291
+
 val testcontainersVersion = "1.20.6"
 val wiremockVersion = "3.9.2"
 
@@ -65,6 +72,9 @@ dependencies {
 
     implementation("com.fasterxml.jackson.core:jackson-databind")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
+    // logstash-logback-encoder 9.x pulls Jackson 3.x (tools.jackson); pin the
+    // Jackson 3 BOM to a patched release (CVE-2026-29062/54512/54513, GHSA-r7wm-3cxj-wff9).
+    implementation(platform("tools.jackson:jackson-bom:3.1.4"))
     implementation("net.logstash.logback:logstash-logback-encoder:9.0")
     implementation("io.micrometer:micrometer-registry-prometheus")
 
