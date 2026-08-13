@@ -44,7 +44,8 @@ public class InventoryDataTool {
 
     /** Fallback — returns a safe cached snapshot when the WMS is unreachable. */
     public List<StockLevel> stockLevelsFallback(Throwable t) {
-        log.warn("[InventoryDataTool] WMS unavailable ({}), returning cached snapshot", t.getMessage());
+        log.warn("[InventoryDataTool] WMS unavailable ({}), returning cached snapshot",
+                t.getClass().getSimpleName());
         return buildSyntheticInventory();
     }
 

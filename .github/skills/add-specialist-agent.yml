@@ -15,7 +15,7 @@ instructions: |
   @RequiredArgsConstructor
   @Slf4j
   public class MyNewAgent implements CommerceAgent {
-      private final OpenAIClient openAIClient;
+      private final LlmGateway llmGateway;
       
       @Override
       public String getName() { return "MyNewAgent"; }
@@ -23,7 +23,7 @@ instructions: |
       @Override
       public AgentMessage analyse(DailyAnalysisContext ctx) {
           // 1. Fetch domain data
-          // 2. Call LLM for interpretation (temperature 0.4)
+          // 2. Call LlmGateway for bounded interpretation (temperature 0.4)
           // 3. Return AgentMessage with FINDINGS type
           return AgentMessage.builder()
               .agentName(getName())
@@ -42,9 +42,10 @@ instructions: |
   CompletableFuture.allOf(...existingFutures..., myAgentFuture).join();
   ```
   
-  3. Add findings to synthesis prompt in buildSynthesisPrompt().
+  3. Add findings to the coordinator's JSON-encoded untrusted-data payload.
   
-  4. Write unit test — mock LLM response, verify AgentMessage fields.
+  4. Write unit test — mock LlmGateway, verify AgentMessage and fallback fields.
   
-  Rule: If agent throws, coordinator must continue with remaining agents.
-  Add try/catch in coordinator that logs warning and returns empty AgentMessage.
+  Rule: If an agent throws, the coordinator must continue with an explicit
+  unavailable message. Log only the exception type; never include raw exception
+  messages or provider output.

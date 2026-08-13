@@ -1,6 +1,23 @@
 briefing:
   cron: "0 * * * * *"  # Every minute in dev — for fast iteration testing
 
+# Dev profile: safe local defaults for iteration against Docker Compose infra.
+# Coordination runs in-memory (single JVM) so a local Redis is optional. Point
+# at the Docker Compose Postgres. Security still validates real JWTs — set
+# SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI and PLATFORM_SECURITY_AUDIENCES
+# to a dev identity provider before starting.
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/commerce}
+    username: ${SPRING_DATASOURCE_USERNAME:commerce}
+    password: ${SPRING_DATASOURCE_PASSWORD:commerce}
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+
+platform:
+  redis-enabled: ${PLATFORM_REDIS_ENABLED:false}
+
 logging:
   level:
     com.agentforge: DEBUG

@@ -1,0 +1,139 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "schemaVersion": 39,
+  "title": "Multi-Agent Commerce — Platform SLO",
+  "tags": ["multi-agent-commerce", "slo"],
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Availability & API",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "stat",
+      "title": "API availability (5xx SLO)",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "targets": [
+        {
+          "expr": "1 - (sum(rate(http_server_requests_seconds_count{status=~\"5..\"}[5m])) / clamp_min(sum(rate(http_server_requests_seconds_count[5m])), 1e-9))",
+          "legendFormat": "success ratio"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate by status",
+      "gridPos": { "h": 6, "w": 9, "x": 6, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(http_server_requests_seconds_count[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "API latency p50/p95/p99",
+      "gridPos": { "h": 6, "w": 9, "x": 15, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_requests_seconds_bucket{uri!~\".*actuator.*\"}[5m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{uri!~\".*actuator.*\"}[5m])))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket{uri!~\".*actuator.*\"}[5m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Runs & Groundedness",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 }
+    },
+    {
+      "type": "stat",
+      "title": "Run success ratio (30m)",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "targets": [
+        {
+          "expr": "sum(rate(runtime_run_completed_total{outcome=\"success\"}[30m])) / clamp_min(sum(rate(runtime_run_completed_total[30m])), 1e-9)",
+          "legendFormat": "success"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Run outcomes",
+      "gridPos": { "h": 6, "w": 9, "x": 6, "y": 8 },
+      "targets": [
+        { "expr": "sum by (outcome) (rate(runtime_run_completed_total[15m]))", "legendFormat": "{{outcome}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Degraded & stale evidence",
+      "gridPos": { "h": 6, "w": 9, "x": 15, "y": 8 },
+      "targets": [
+        { "expr": "sum by (reason) (rate(runtime_degraded_total[15m]))", "legendFormat": "degraded {{reason}}" },
+        { "expr": "sum by (tool_name) (rate(runtime_evidence_stale_total[15m]))", "legendFormat": "stale {{tool_name}}" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Providers, Tools & Budgets",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM latency p95",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le, llm_model) (rate(runtime_llm_latency_seconds_bucket[10m])))", "legendFormat": "{{llm_model}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool latency p95 by status",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le, tool_name) (rate(runtime_tool_latency_seconds_bucket[10m])))", "legendFormat": "{{tool_name}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Budget hard-stops & circuit opens",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 15 },
+      "targets": [
+        { "expr": "sum by (dimension) (increase(runtime_budget_stop_total[15m]))", "legendFormat": "budget {{dimension}}" },
+        { "expr": "sum by (circuit) (increase(runtime_circuit_state_total{state=\"OPEN\"}[15m]))", "legendFormat": "circuit-open {{circuit}}" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Queue & Approvals",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Durable run queue age (oldest PENDING)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 22 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "max(runtime_run_queue_age_seconds)", "legendFormat": "oldest pending age" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Approval waits (rate)",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 22 },
+      "targets": [
+        { "expr": "sum(rate(runtime_approval_wait_total[15m]))", "legendFormat": "approval waits" }
+      ]
+    }
+  ]
+}

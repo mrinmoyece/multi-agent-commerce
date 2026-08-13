@@ -1,0 +1,70 @@
+# Test profile: deterministic, no external infrastructure required.
+# - H2 in PostgreSQL-compatibility mode with the schema built from the JPA model
+#   (Flyway disabled here; the Flyway migration is exercised by Testcontainers
+#   integration tests that are skipped automatically when Docker is unavailable).
+# - In-memory coordination stand-ins (no Redis), rate limiting relaxed.
+# - A stub JwtDecoder is supplied by the test context; spring-security-test
+#   post-processors inject authentication directly, so no real issuer is needed.
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisReactiveAutoConfiguration
+  datasource:
+    url: jdbc:h2:mem:platform;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    open-in-view: false
+    properties:
+      hibernate.dialect: org.hibernate.dialect.H2Dialect
+      hibernate.jdbc.time_zone: UTC
+  flyway:
+    enabled: false
+  sql:
+    init:
+      mode: never
+
+management:
+  server:
+    port: -1
+  tracing:
+    sampling:
+      probability: 0.0
+  otlp:
+    tracing:
+      export:
+        enabled: false
+
+platform:
+  redis-enabled: false
+  rate-limit:
+    enabled: false
+  security:
+    audiences:
+      - test-audience
+    roles-claim: roles
+
+# Layer 2 runtime posture for tests: deterministic fixtures, human-in-the-loop
+# risk gating disabled so runs finalise synchronously (dedicated HITL tests flip
+# runtime.risk.enabled on), durable memory enabled against H2, tracing export off.
+runtime:
+  tools:
+    mode: FIXTURE
+  risk:
+    enabled: false
+  memory:
+    enabled: true
+
+logging:
+  level:
+    org.springframework.security: WARN
+
+# The OpenAIClient bean requires a non-blank key to build; it is never called in
+# tests because the coordinator is mocked. No network I/O occurs at build time.
+llm:
+  provider: github-models
+  api-key: test-key

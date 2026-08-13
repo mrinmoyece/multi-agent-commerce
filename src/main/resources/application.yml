@@ -4,24 +4,125 @@ spring:
   threads:
     virtual:
       enabled: true
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:}
+    username: ${SPRING_DATASOURCE_USERNAME:}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+      minimum-idle: ${DB_POOL_MIN_IDLE:2}
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+    properties:
+      hibernate.jdbc.time_zone: UTC
+  flyway:
+    enabled: true
+    baseline-on-migrate: false
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      password: ${SPRING_DATA_REDIS_PASSWORD:}
+      ssl:
+        enabled: ${SPRING_DATA_REDIS_SSL:false}
+      timeout: ${SPRING_DATA_REDIS_TIMEOUT:2s}
+  mvc:
+    problemdetails:
+      enabled: true
 
 server:
   port: 8080
+  shutdown: graceful
 
 llm:
-  provider: ${LLM_PROVIDER:github_models}
+  provider: ${LLM_PROVIDER:github-models}
   chat-deployment: ${AZURE_CHAT_DEPLOYMENT:gpt-4o}
-
-azure:
-  openai:
-    endpoint: ${AZURE_OPENAI_ENDPOINT:}
-    key: ${AZURE_OPENAI_API_KEY:}
-
-github:
-  token: ${GITHUB_TOKEN:}
+  endpoint: ${AZURE_OPENAI_ENDPOINT:}
+  api-key: ${LLM_API_KEY:${AZURE_OPENAI_API_KEY:${GITHUB_TOKEN:}}}
+  timeout: ${LLM_TIMEOUT:30s}
+  max-response-characters: ${LLM_MAX_RESPONSE_CHARACTERS:32768}
 
 retailer:
   id: ${RETAILER_ID:default-retailer}
+
+# Layer 2 agent runtime: provider-neutral safety envelope (budgets, model/provider
+# allowlists, tool grounding mode, brakes, durable memory, and human-in-the-loop
+# risk gating). Grounding defaults to committed FIXTURE data; set RUNTIME_TOOLS_MODE=LIVE
+# with the production adapter backends configured to use live systems of record.
+runtime:
+  tools:
+    mode: ${RUNTIME_TOOLS_MODE:FIXTURE}
+    # Live production adapters (bound from runtime.tools.live.*) are used only when
+    # mode=LIVE. Nothing below has a production default: LiveAdapterValidator fails
+    # startup fast unless every endpoint URL/allowlist/deadline/size/pagination/
+    # freshness/auth is present and safe (HTTPS-only, host on its own allowlist).
+    # Supply all secrets from a secret manager — never commit them. Example shape:
+    #
+    # live:
+    #   inventory:
+    #     base-url: ${LIVE_INVENTORY_BASE_URL}        # https host, must be allow-listed
+    #     path: ${LIVE_INVENTORY_PATH}
+    #     allowed-hosts: ${LIVE_INVENTORY_ALLOWED_HOSTS}
+    #     system-of-record: ${LIVE_INVENTORY_SOR}     # description, not a secret
+    #     connect-timeout: ${LIVE_INVENTORY_CONNECT_TIMEOUT:2s}
+    #     read-timeout: ${LIVE_INVENTORY_READ_TIMEOUT:5s}
+    #     max-response-bytes: ${LIVE_INVENTORY_MAX_BYTES:65536}
+    #     page-size: ${LIVE_INVENTORY_PAGE_SIZE:100}
+    #     max-pages: ${LIVE_INVENTORY_MAX_PAGES:10}
+    #     max-staleness: ${LIVE_INVENTORY_MAX_STALENESS:15m}
+    #     auth:
+    #       type: ${LIVE_INVENTORY_AUTH_TYPE:OAUTH2_CLIENT_CREDENTIALS}  # or MTLS / API_KEY
+    #       token-url: ${LIVE_INVENTORY_TOKEN_URL}
+    #       client-id: ${LIVE_INVENTORY_CLIENT_ID}
+    #       client-secret: ${LIVE_INVENTORY_CLIENT_SECRET}
+    #       scope: ${LIVE_INVENTORY_SCOPE:}
+    #   pricing:   { ... same shape ... }
+    #   sentiment: { ... same shape ... }
+  models:
+    allowed-providers: ${RUNTIME_ALLOWED_PROVIDERS:azure-openai,github-models}
+    allowed-models: ${RUNTIME_ALLOWED_MODELS:gpt-4o,gpt-4o-mini}
+    default-model: ${RUNTIME_DEFAULT_MODEL:gpt-4o}
+  budget:
+    max-tokens: ${RUNTIME_MAX_TOKENS:120000}
+    max-requests: ${RUNTIME_MAX_REQUESTS:24}
+    max-latency: ${RUNTIME_MAX_LATENCY:3m}
+    max-cost-micros: ${RUNTIME_MAX_COST_MICROS:500000}
+  brakes:
+    max-tool-calls: ${RUNTIME_MAX_TOOL_CALLS:32}
+    max-agent-rounds: ${RUNTIME_MAX_AGENT_ROUNDS:4}
+    deadline: ${RUNTIME_DEADLINE:2m}
+  memory:
+    enabled: ${RUNTIME_MEMORY_ENABLED:true}
+    fact-ttl: ${RUNTIME_MEMORY_TTL:7d}
+    max-facts-per-retailer: ${RUNTIME_MEMORY_MAX_FACTS:500}
+  risk:
+    enabled: ${RUNTIME_RISK_ENABLED:true}
+    low-confidence-threshold: ${RUNTIME_RISK_LOW_CONFIDENCE:0.5}
+
+# Platform foundations: distributed coordination + resource-server security.
+# Production posture is fail-closed — Redis is required by default and the
+# OAuth2 issuer/audience MUST be provided via environment variables
+# (SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI, PLATFORM_SECURITY_AUDIENCES).
+# In-memory coordination stand-ins are only enabled under the dev/test profiles.
+platform:
+  redis-enabled: ${PLATFORM_REDIS_ENABLED:true}
+  lock:
+    ttl: ${PLATFORM_LOCK_TTL:5m}
+  status-cache:
+    ttl: ${PLATFORM_STATUS_CACHE_TTL:30s}
+  orchestration:
+    timeout: ${PLATFORM_ORCHESTRATION_TIMEOUT:2m}
+    pool-size: ${PLATFORM_ORCHESTRATION_POOL_SIZE:4}
+    queue-capacity: ${PLATFORM_ORCHESTRATION_QUEUE_CAPACITY:32}
+  rate-limit:
+    enabled: ${PLATFORM_RATE_LIMIT_ENABLED:true}
+    limit: ${PLATFORM_RATE_LIMIT:120}
+    window: ${PLATFORM_RATE_LIMIT_WINDOW:1m}
+  security:
+    audiences: ${PLATFORM_SECURITY_AUDIENCES:}
+    roles-claim: ${PLATFORM_SECURITY_ROLES_CLAIM:roles}
 
 briefing:
   cron: ${BRIEFING_CRON:0 0 6 * * *}   # 06:00 daily — override via env var
@@ -38,19 +139,45 @@ spring.task.scheduling:
     size: 2
   thread-name-prefix: briefing-scheduler-
 
+spring.lifecycle:
+  timeout-per-shutdown-phase: 30s
+
 resilience4j:
   circuitbreaker:
     instances:
       llm:
         sliding-window-size: 5
+        minimum-number-of-calls: 5
         failure-rate-threshold: 60
         wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 2
+  retry:
+    instances:
+      llm:
+        max-attempts: 2
+        wait-duration: 500ms
 
 management:
+  server:
+    port: ${MANAGEMENT_PORT:8081}
   endpoints:
     web:
       exposure:
         include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
   metrics:
     tags:
       application: ${spring.application.name}
+  tracing:
+    sampling:
+      probability: ${MANAGEMENT_TRACING_SAMPLING:0.1}
+  otlp:
+    tracing:
+      # OTLP span export is opt-in: enable and point at your collector in prod.
+      export:
+        enabled: ${MANAGEMENT_OTLP_TRACING_ENABLED:false}
+      endpoint: ${MANAGEMENT_OTLP_TRACING_ENDPOINT:http://localhost:4318/v1/traces}

@@ -1,0 +1,175 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: multi-agent-commerce
+  labels:
+    app: multi-agent-commerce
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: multi-agent-commerce.slo
+      rules:
+        # ── Availability ─────────────────────────────────────────────────────
+        - alert: CommerceApiDown
+          expr: |
+            absent(up{job="multi-agent-commerce"} == 1)
+          for: 3m
+          labels:
+            severity: critical
+            service: multi-agent-commerce
+          annotations:
+            summary: "Commerce API has no healthy scrape targets"
+            description: "No pod is reporting up for 3m. SLO: 99.9% availability."
+            runbook_url: "https://github.com/mrinmoyece/multi-agent-commerce/blob/main/docs/RUNBOOK.md#api-down"
+
+        - alert: CommerceApiHighErrorRate
+          expr: |
+            sum(rate(http_server_requests_seconds_count{job="multi-agent-commerce",status=~"5.."}[5m]))
+              /
+            clamp_min(sum(rate(http_server_requests_seconds_count{job="multi-agent-commerce"}[5m])), 1e-9)
+              > 0.02
+          for: 10m
+          labels:
+            severity: critical
+            service: multi-agent-commerce
+          annotations:
+            summary: "5xx error ratio above 2% (SLO burn)"
+            description: "Server error ratio has exceeded the 2% error budget for 10m."
+            runbook_url: "https://github.com/mrinmoyece/multi-agent-commerce/blob/main/docs/RUNBOOK.md#high-error-rate"
+
+        - alert: CommerceApiLatencyHigh
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(http_server_requests_seconds_bucket{job="multi-agent-commerce",uri!~".*actuator.*"}[5m]))
+            ) > 1.5
+          for: 10m
+          labels:
+            severity: warning
+            service: multi-agent-commerce
+          annotations:
+            summary: "API p95 latency above 1.5s"
+            description: "p95 request latency SLO (1.5s) breached for 10m."
+            runbook_url: "https://github.com/mrinmoyece/multi-agent-commerce/blob/main/docs/RUNBOOK.md#api-latency"
+
+        # ── Run success ──────────────────────────────────────────────────────
+        - alert: CommerceRunFailureRateHigh
+          expr: |
+            sum(rate(runtime_run_completed_total{outcome="failed"}[30m]))
+              /
+            clamp_min(sum(rate(runtime_run_completed_total[30m])), 1e-9)
+              > 0.10
+          for: 15m
+          labels:
+            severity: critical
+            service: multi-agent-commerce
+          annotations:
+            summary: "Run failure ratio above 10%"
+            description: "More than 10% of durable runs are failing. SLO: >=95% run success."
+            runbook_url: "https://github.com/mrinmoyece/multi-agent-commerce/blob/main/docs/RUNBOOK.md#run-failures"
+
+        # ── Groundedness / degradation ───────────────────────────────────────
+        - alert: CommerceDegradedRunsHigh
+          expr: |
+            sum(rate(runtime_degraded_total[15m])) > 0.2
+          for: 15m
+          labels:
+            severity: warning
+            service: multi-agent-commerce
+          annotations:
+            summary: "Elevated degraded agent executions"
+            description: "Agents are frequently degrading (schema/LLM/budget). Groundedness SLO at risk."
+            runbook_url: "https://github.com/mrinmoyece/multi-agent-commerce/blob/main/docs/RUNBOOK.md#degraded-runs"
+
+        # ── Stale evidence ───────────────────────────────────────────────────
+        - alert: CommerceStaleEvidenceHigh
+          expr: |
+            sum(rate(runtime_evidence_stale_total[15m])) > 0.1
+          for: 15m
+          labels:
+            severity: warning
+            service: multi-agent-commerce
+          annotations:
+            summary: "Tools frequently returning stale evidence"
+            description: "Upstream systems of record are serving evidence past its freshness window."
+            runbook_url: "https://github.com/mrinmoyece/multi-agent-commerce/blob/main/docs/RUNBOOK.md#stale-evidence"
+
+        # ── Approval latency / backlog ───────────────────────────────────────
+        - alert: CommerceApprovalBacklogGrowing
+          expr: |
+            sum(increase(runtime_approval_wait_total[1h])) > 20
+          for: 15m
+          labels:
+            severity: warning
+            service: multi-agent-commerce
+          annotations:
+            summary: "Approval backlog growing"
+            description: "More than 20 runs entered AWAITING_APPROVAL in the last hour; check on-call approval queue."
+            runbook_url: "https://github.com/mrinmoyece/multi-agent-commerce/blob/main/docs/RUNBOOK.md#approval-backlog"
+
+        # ── Provider / tool latency & errors ─────────────────────────────────
+        - alert: CommerceLlmLatencyHigh
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(runtime_llm_latency_seconds_bucket[10m]))
+            ) > 20
+          for: 10m
+          labels:
+            severity: warning
+            service: multi-agent-commerce
+          annotations:
+            summary: "LLM provider p95 latency above 20s"
+            description: "Azure OpenAI p95 latency SLO breached; expect run slowdowns."
+            runbook_url: "https://github.com/mrinmoyece/multi-agent-commerce/blob/main/docs/RUNBOOK.md#provider-latency"
+
+        - alert: CommerceToolErrorRateHigh
+          expr: |
+            sum(rate(runtime_tool_latency_seconds_count{status=~"ERROR|DEGRADED"}[10m]))
+              /
+            clamp_min(sum(rate(runtime_tool_latency_seconds_count[10m])), 1e-9)
+              > 0.10
+          for: 10m
+          labels:
+            severity: warning
+            service: multi-agent-commerce
+          annotations:
+            summary: "Grounded tool error/degraded ratio above 10%"
+            description: "An adapter/tool is failing or degrading frequently. Check circuit state and adapter egress."
+            runbook_url: "https://github.com/mrinmoyece/multi-agent-commerce/blob/main/docs/RUNBOOK.md#tool-errors"
+
+        - alert: CommerceCircuitOpen
+          expr: |
+            sum(increase(runtime_circuit_state_total{state="OPEN"}[10m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+            service: multi-agent-commerce
+          annotations:
+            summary: "A resilience circuit breaker has opened"
+            description: "A provider/adapter circuit opened, isolating a failing dependency. Investigate the upstream."
+            runbook_url: "https://github.com/mrinmoyece/multi-agent-commerce/blob/main/docs/RUNBOOK.md#circuit-open"
+
+        # ── Budget exhaustion ────────────────────────────────────────────────
+        - alert: CommerceBudgetExhaustionSpike
+          expr: |
+            sum(increase(runtime_budget_stop_total[1h])) > 10
+          for: 15m
+          labels:
+            severity: warning
+            service: multi-agent-commerce
+          annotations:
+            summary: "Frequent budget hard-stops"
+            description: "Runs are hitting token/cost/wall-clock budgets more than 10x/hour; review budgets or upstream latency."
+            runbook_url: "https://github.com/mrinmoyece/multi-agent-commerce/blob/main/docs/RUNBOOK.md#budget-exhaustion"
+
+        # ── Queue age ────────────────────────────────────────────────────────
+        - alert: CommerceRunQueueAgeHigh
+          expr: |
+            max(runtime_run_queue_age_seconds) > 900
+          for: 10m
+          labels:
+            severity: critical
+            service: multi-agent-commerce
+          annotations:
+            summary: "Durable run queue age above 15m"
+            description: "The oldest unclaimed run has waited >15m; the execution pool or all replicas may be stalled."
+            runbook_url: "https://github.com/mrinmoyece/multi-agent-commerce/blob/main/docs/RUNBOOK.md#queue-age"

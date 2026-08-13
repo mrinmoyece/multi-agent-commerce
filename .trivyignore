@@ -1,0 +1,20 @@
+# Trivy vulnerability suppressions — audited, build-tool-only advisories.
+#
+# Scope of the runtime image (Dockerfile `runtime` stage) is the Spring Boot
+# fat JAR on productionRuntimeClasspath. The two entries below are pulled ONLY
+# by the Checkstyle static-analysis tool (the `checkstyle` Gradle configuration)
+# which runs in CI and is NEVER packaged into the published container image or
+# executed at runtime. They are therefore not exploitable in the delivered
+# artifact. They remain visible to `trivy fs` because it scans the full Gradle
+# lockfile, so they are suppressed by CVE id here with justification. New CVEs on
+# these packages are NOT suppressed and will re-open the gate for review.
+#
+# Re-audit trigger: bump the `checkstyle` toolVersion in build.gradle.kts so the
+# patched transitives (httpcore5 >= 5.4.3, plexus-utils >= 3.6.1) are pulled,
+# then delete the matching line below.
+
+# org.apache.httpcomponents.core5:httpcore5 5.3.6 — Checkstyle transitive only.
+CVE-2026-54399
+
+# org.codehaus.plexus:plexus-utils 3.3.0 — Checkstyle transitive only.
+CVE-2025-67030

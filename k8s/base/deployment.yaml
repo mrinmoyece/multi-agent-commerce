@@ -1,0 +1,183 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multi-agent-commerce
+  labels:
+    app: multi-agent-commerce
+    app.kubernetes.io/name: multi-agent-commerce
+    app.kubernetes.io/component: api
+spec:
+  # Distributed coordination (Redis locks + durable Postgres run store) means a
+  # scheduled run is created once (retailer+date idempotency key) and executed
+  # exactly once across replicas, so the app is safe to run horizontally scaled
+  # and rolling-updated. Do NOT relax that coordination when changing replicas.
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: multi-agent-commerce
+  template:
+    metadata:
+      labels:
+        app: multi-agent-commerce
+        app.kubernetes.io/name: multi-agent-commerce
+        app.kubernetes.io/component: api
+    spec:
+      serviceAccountName: multi-agent-commerce
+      # Token is projected explicitly by the workload-identity webhook / ESO; it is
+      # not blanket-mounted into every container.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread across zones first, then hosts, so a zone or node loss cannot take
+      # out the whole Deployment. Combined with anti-affinity below.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: multi-agent-commerce
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: multi-agent-commerce
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: multi-agent-commerce
+      containers:
+        - name: multi-agent-commerce
+          # Release automation replaces this with an immutable digest via the
+          # kustomize `images:` transformer (see overlays). Never deploy a tag.
+          image: ghcr.io/mrinmoyece/multi-agent-commerce@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 8081
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "prod"
+            - name: LLM_PROVIDER
+              value: "azure-openai"
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: llm-api-key
+            - name: AZURE_OPENAI_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: azure-openai-endpoint
+            # ── Persistence (PostgreSQL) ──────────────────────────────────
+            - name: SPRING_DATASOURCE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: datasource-url
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: datasource-username
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: datasource-password
+            # ── Coordination (Redis) ──────────────────────────────────────
+            - name: PLATFORM_REDIS_ENABLED
+              value: "true"
+            - name: SPRING_DATA_REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: multi-agent-commerce-config
+                  key: redis-host
+            - name: SPRING_DATA_REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: multi-agent-commerce-config
+                  key: redis-port
+            - name: SPRING_DATA_REDIS_SSL
+              valueFrom:
+                configMapKeyRef:
+                  name: multi-agent-commerce-config
+                  key: redis-ssl
+            - name: SPRING_DATA_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: multi-agent-commerce-secrets
+                  key: redis-password
+            # ── OAuth2 resource server ────────────────────────────────────
+            - name: SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
+              valueFrom:
+                configMapKeyRef:
+                  name: multi-agent-commerce-config
+                  key: oauth2-issuer-uri
+            - name: PLATFORM_SECURITY_AUDIENCES
+              valueFrom:
+                configMapKeyRef:
+                  name: multi-agent-commerce-config
+                  key: oauth2-audiences
+          startupProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: management
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: management
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: management
+            periodSeconds: 30
+          lifecycle:
+            preStop:
+              # Give the ingress/endpoints controllers time to stop routing to this
+              # pod before Spring's graceful shutdown drains in-flight work.
+              exec:
+                command: ["sh", "-c", "sleep 8"]
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

@@ -1,236 +1,207 @@
 package com.agentforge.commerce.coordinator;
 
-import com.agentforge.commerce.agent.CommerceAgent;
-import com.agentforge.commerce.agent.InventoryAgent;
-import com.agentforge.commerce.agent.PricingAgent;
-import com.agentforge.commerce.agent.SentimentAgent;
 import com.agentforge.commerce.model.AgentMessage;
 import com.agentforge.commerce.model.DailyAnalysisContext;
 import com.agentforge.commerce.model.DailyBriefing;
-import com.azure.ai.openai.OpenAIClient;
-import com.azure.ai.openai.models.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Component;
-
-import java.time.Instant;
-import java.time.LocalDate;
+import com.agentforge.commerce.runtime.contract.AgentResultEnvelope;
+import com.agentforge.commerce.runtime.contract.TokenUsage;
+import com.agentforge.commerce.runtime.engine.AgentRuntimeEngine;
+import com.agentforge.commerce.runtime.engine.AgentRuntimeEngine.SynthesisOutcome;
+import com.agentforge.commerce.runtime.engine.RuntimeRunContext;
+import com.agentforge.commerce.runtime.engine.RuntimeRunReport;
+import com.agentforge.commerce.runtime.engine.SpecialistOutcome;
+import com.agentforge.commerce.runtime.telemetry.RuntimeSpan;
+import com.agentforge.commerce.runtime.telemetry.RuntimeTelemetry;
+import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Component;
 
 /**
  * Coordinator Agent — the "manager" of the multi-agent system.
  *
- * Responsibilities:
- * 1. Dispatch all specialist agents (Inventory, Pricing, Sentiment) IN PARALLEL
- * 2. Collect their individual findings
- * 3. Synthesise a unified daily executive briefing via a second LLM call
- * 4. Surface cross-agent insights no single specialist could see alone
+ * <p>Responsibilities: dispatch the three grounded specialists (Inventory,
+ * Pricing, Sentiment) in parallel through the {@link AgentRuntimeEngine},
+ * synthesise a unified daily executive briefing from their schema-validated,
+ * evidence-bearing envelopes, and surface cross-agent insights no single
+ * specialist could see alone. The coordinator owns no domain logic — the engine
+ * owns grounding, prompts, budgets, brakes, schema validation, telemetry and
+ * memory; the coordinator owns fan-out, deadline/cancellation and assembly.</p>
  *
- * The coordinator does NOT implement domain logic — only orchestrates and synthesises.
- * Domain logic lives in each specialist agent.
- *
- * Scheduling: runs at 06:00 daily (configurable via briefing.cron).
- * There is currently no on-demand HTTP trigger — see README "Simulated Data & Current Limitations".
+ * <p>Durable, once-only scheduling across replicas is owned by the platform run
+ * executor, which drives this coordinator via {@link #orchestrate}. The legacy
+ * {@link #runDailyAnalysis} entry point is retained for direct, in-process use.</p>
  */
 @Component
-@RequiredArgsConstructor
-@Slf4j
 public class AgentCoordinator {
 
-    private final InventoryAgent inventoryAgent;
-    private final PricingAgent   pricingAgent;
-    private final SentimentAgent sentimentAgent;
-    private final OpenAIClient   openAIClient;
-    private final ObjectMapper   objectMapper;   // injected bean — thread-safe, not re-created inline
+    private static final Logger LOG = LoggerFactory.getLogger(AgentCoordinator.class);
 
-    /**
-     * Spring Boot's auto-configured task executor, built from the
-     * {@code spring.task.execution.pool} properties in application.yml
-     * (tuned size, "commerce-agent-" thread name prefix). Passed explicitly to
-     * every {@code supplyAsync} call below so agent dispatch actually uses the
-     * tuned pool instead of silently falling back to the JVM's default common pool.
-     */
-    @Qualifier("applicationTaskExecutor")
+    private final AgentRuntimeEngine engine;
+    private final RuntimeTelemetry telemetry;
     private final Executor applicationTaskExecutor;
 
-    @Value("${llm.chat-deployment:gpt-4o}")
-    private String chatDeployment;
-
-    @Value("${retailer.id:default-retailer}")
-    private String retailerId;
-
-    // ── Scheduled entry point ────────────────────────────────────────────────
-
-    /** Runs at 06:00 daily. Override via {@code briefing.cron} in application.yml. */
-    @Scheduled(cron = "${briefing.cron:0 0 6 * * *}")
-    public void scheduledDailyAnalysis() {
-        runDailyAnalysis(DailyAnalysisContext.builder()
-                .date(LocalDate.now())
-                .retailerId(retailerId)
-                .build());
+    public AgentCoordinator(AgentRuntimeEngine engine, RuntimeTelemetry telemetry,
+                            @Qualifier("applicationTaskExecutor") Executor applicationTaskExecutor) {
+        this.engine = engine;
+        this.telemetry = telemetry;
+        this.applicationTaskExecutor = applicationTaskExecutor;
     }
 
-    // ── Core orchestration ───────────────────────────────────────────────────
-
-    @Async
+    /** Legacy in-process entry point returning only the briefing. */
     public CompletableFuture<DailyBriefing> runDailyAnalysis(DailyAnalysisContext context) {
-        log.info("Coordinator: starting daily analysis — retailer={} date={}",
+        LOG.info("Coordinator: starting daily analysis — retailer={} date={}",
                 context.getRetailerId(), context.getDate());
-
-        // PHASE 1: All specialist agents run in PARALLEL, dispatched on the tuned
-        // "commerce-agent-" pool (application.yml: spring.task.execution) rather than
-        // the JVM's default common pool.
-        CompletableFuture<AgentMessage> inventoryFuture = CompletableFuture
-                .supplyAsync(() -> safeAnalyse(inventoryAgent, context), applicationTaskExecutor);
-        CompletableFuture<AgentMessage> pricingFuture   = CompletableFuture
-                .supplyAsync(() -> safeAnalyse(pricingAgent, context), applicationTaskExecutor);
-        CompletableFuture<AgentMessage> sentimentFuture = CompletableFuture
-                .supplyAsync(() -> safeAnalyse(sentimentAgent, context), applicationTaskExecutor);
-
         try {
-            // allOf(...).join() already blocks until every future has completed (or
-            // throws on the first failure), so the .get() calls below are reading
-            // already-completed futures — they are not a second wait.
-            CompletableFuture.allOf(inventoryFuture, pricingFuture, sentimentFuture).join();
-
-            AgentMessage inventory = inventoryFuture.get();
-            AgentMessage pricing   = pricingFuture.get();
-            AgentMessage sentiment = sentimentFuture.get();
-
-            log.info("All agents reported — synthesising briefing");
-
-            // PHASE 2: LLM synthesises cross-agent insights
-            DailyBriefing briefing = synthesise(context, inventory, pricing, sentiment);
-
-            log.info("Daily briefing ready — {} actions, {} alerts",
-                    briefing.getRecommendedActions() != null ? briefing.getRecommendedActions().size() : 0,
-                    briefing.getUrgentAlerts()       != null ? briefing.getUrgentAlerts().size()       : 0);
-
-            return CompletableFuture.completedFuture(briefing);
-
-        } catch (Exception e) {
-            if (e instanceof InterruptedException) {
+            OrchestrationResult result = orchestrateInternal(context, null);
+            return CompletableFuture.completedFuture(result.briefing());
+        } catch (RuntimeException e) {
+            if (e.getCause() instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            log.error("Coordinator daily analysis failed: {}", e.getMessage(), e);
+            LOG.error("Coordinator daily analysis failed ({})", e.getClass().getSimpleName());
             throw new DailyAnalysisException("Daily analysis failed for retailer "
                     + context.getRetailerId() + " on " + context.getDate(), e);
         }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
+    /**
+     * Durable-execution entry point. Runs the specialists (bounded by the run
+     * brakes and {@code timeout}), synthesises the briefing, and returns the
+     * briefing, the legacy per-agent messages, the traceable envelopes and a
+     * non-sensitive run report for persistence and telemetry.
+     *
+     * @param context the run context
+     * @param timeout hard ceiling on the parallel agent phase (never {@code null})
+     * @return the full orchestration outcome
+     */
+    public OrchestrationResult orchestrate(DailyAnalysisContext context, Duration timeout) {
+        return orchestrateInternal(context, timeout);
+    }
+
+    private OrchestrationResult orchestrateInternal(DailyAnalysisContext context, Duration timeout) {
+        String runId = context.getRunId() != null ? context.getRunId() : UUID.randomUUID().toString();
+        RuntimeRunContext ctx = engine.newContext(runId, context.getRetailerId(), context.getDate());
+        RuntimeSpan span = telemetry.runSpan(runId, context.getRetailerId());
+        try {
+            CompletableFuture<SpecialistOutcome> inventoryFuture = dispatch(
+                    AgentRuntimeEngine.INVENTORY_AGENT, () -> engine.runInventory(ctx));
+            CompletableFuture<SpecialistOutcome> pricingFuture = dispatch(
+                    AgentRuntimeEngine.PRICING_AGENT, () -> engine.runPricing(ctx));
+            CompletableFuture<SpecialistOutcome> sentimentFuture = dispatch(
+                    AgentRuntimeEngine.SENTIMENT_AGENT, () -> engine.runSentiment(ctx));
+
+            SpecialistOutcome inventory;
+            SpecialistOutcome pricing;
+            SpecialistOutcome sentiment;
+            try {
+                CompletableFuture<Void> all =
+                        CompletableFuture.allOf(inventoryFuture, pricingFuture, sentimentFuture);
+                if (timeout == null) {
+                    all.join();
+                } else {
+                    all.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+                }
+                inventory = inventoryFuture.get();
+                pricing = pricingFuture.get();
+                sentiment = sentimentFuture.get();
+            } catch (TimeoutException e) {
+                ctx.brakes().cancel();
+                inventoryFuture.cancel(true);
+                pricingFuture.cancel(true);
+                sentimentFuture.cancel(true);
+                span.error(e);
+                throw new DailyAnalysisException("Agent orchestration timed out after " + timeout, e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                span.error(e);
+                throw new DailyAnalysisException("Agent orchestration was interrupted", e);
+            } catch (ExecutionException e) {
+                span.error(e);
+                throw new DailyAnalysisException("Agent orchestration failed", e);
+            }
+
+            LOG.info("All specialists reported — synthesising briefing");
+            SynthesisOutcome synthesis = engine.synthesise(ctx, inventory, pricing, sentiment);
+            OrchestrationResult result = assemble(ctx, inventory, pricing, sentiment, synthesis);
+            LOG.info("Daily briefing ready — {} actions, {} alerts",
+                    safeSize(result.briefing().getRecommendedActions()),
+                    safeSize(result.briefing().getUrgentAlerts()));
+            return result;
+        } finally {
+            span.stop();
+        }
+    }
+
+    private CompletableFuture<SpecialistOutcome> dispatch(String agentName, Supplier<SpecialistOutcome> work) {
+        return CompletableFuture.supplyAsync(() -> safeRun(agentName, work), applicationTaskExecutor);
+    }
+
+    private SpecialistOutcome safeRun(String agentName, Supplier<SpecialistOutcome> work) {
+        try {
+            return work.get();
+        } catch (RuntimeException e) {
+            LOG.warn("[Coordinator] {} failed with {} — proceeding degraded",
+                    agentName, e.getClass().getSimpleName());
+            return engine.degradedOutcome(agentName, "specialist_error:" + e.getClass().getSimpleName());
+        }
+    }
+
+    private OrchestrationResult assemble(RuntimeRunContext ctx, SpecialistOutcome inventory,
+                                         SpecialistOutcome pricing, SpecialistOutcome sentiment,
+                                         SynthesisOutcome synthesis) {
+        List<AgentResultEnvelope> specialists = List.of(
+                inventory.envelope(), pricing.envelope(), sentiment.envelope());
+        TokenUsage total = TokenUsage.ZERO;
+        for (AgentResultEnvelope envelope : specialists) {
+            total = total.plus(envelope.usage());
+        }
+        total = total.plus(synthesis.envelope().usage());
+        boolean degraded = synthesis.envelope().isDegraded()
+                || specialists.stream().anyMatch(AgentResultEnvelope::isDegraded);
+        RuntimeRunReport report = new RuntimeRunReport(specialists, synthesis.envelope(), total,
+                ctx.ledger().snapshot(), ctx.brakes().toolCallCount(), ctx.brakes().agentRoundCount(), degraded);
+        List<AgentResultEnvelope> envelopes = List.of(inventory.envelope(), pricing.envelope(),
+                sentiment.envelope(), synthesis.envelope());
+        List<AgentMessage> messages = List.of(inventory.message(), pricing.message(), sentiment.message());
+        return new OrchestrationResult(synthesis.briefing(), messages, envelopes, report);
+    }
+
+    private static int safeSize(List<String> values) {
+        return values == null ? 0 : values.size();
+    }
 
     /**
-     * Wraps agent.analyse() so a single failing agent does not abort the whole run.
-     * Returns an empty COMPLETE message if the agent throws.
+     * The full outcome of an orchestration: the synthesised briefing, the legacy
+     * per-agent messages (Layer 1 persistence), the traceable envelopes, and a
+     * non-sensitive run report. The two-argument constructor is retained for
+     * backward-compatible construction paths and tests.
+     *
+     * @param briefing      the synthesised daily briefing
+     * @param agentMessages legacy per-specialist messages
+     * @param envelopes     traceable specialist + coordinator envelopes
+     * @param report        non-sensitive run report (budgets, brakes, usage)
      */
-    private AgentMessage safeAnalyse(CommerceAgent agent, DailyAnalysisContext ctx) {
-        try {
-            return agent.analyse(ctx);
-        } catch (Exception e) {
-            log.warn("[Coordinator] {} failed: {} — proceeding without it",
-                    agent.getName(), e.getMessage());
-            return AgentMessage.builder()
-                    .messageId(UUID.randomUUID().toString())
-                    .agentName(agent.getName())
-                    .messageType(AgentMessage.MessageType.COMPLETE)
-                    .priority(AgentMessage.AgentMessagePriority.NORMAL)
-                    .content("Agent unavailable: " + e.getMessage())
-                    .timestamp(Instant.now())
-                    .build();
-        }
-    }
+    public record OrchestrationResult(DailyBriefing briefing, List<AgentMessage> agentMessages,
+                                      List<AgentResultEnvelope> envelopes, RuntimeRunReport report) {
 
-    private DailyBriefing synthesise(DailyAnalysisContext ctx,
-                                      AgentMessage inventory,
-                                      AgentMessage pricing,
-                                      AgentMessage sentiment) {
-        String prompt = """
-                You are the Chief of Staff for a major UK retail operation.
-                Three specialist AI agents have submitted their daily analysis for %s:
-
-                INVENTORY AGENT:
-                %s
-
-                PRICING AGENT:
-                %s
-
-                CUSTOMER SENTIMENT AGENT:
-                %s
-
-                Your job:
-                1. Identify cross-cutting insights (e.g. low stock + high demand + good sentiment = restock urgently)
-                2. List the top 5 recommended actions for today, in priority order
-                3. Flag any urgent issues requiring immediate attention
-                4. Write a 3-sentence executive summary for the daily leadership standup
-
-                Return JSON only:
-                {"crossInsights":[],"recommendedActions":[],"urgentAlerts":[],"executiveSummary":""}
-                """.formatted(ctx.getDate(),
-                inventory.getContent(), pricing.getContent(), sentiment.getContent());
-
-        var options = new ChatCompletionsOptions(List.of(new ChatRequestUserMessage(prompt)));
-        options.setMaxTokens(1500);
-        options.setTemperature(0.2);
-
-        String raw = openAIClient.getChatCompletions(chatDeployment, options)
-                .getChoices().get(0).getMessage().getContent()
-                .replaceAll("(?s)```json\\s*|```\\s*$", "")
-                .trim();
-
-        return parseBriefing(ctx, inventory, pricing, sentiment, raw);
-    }
-
-    private DailyBriefing parseBriefing(DailyAnalysisContext ctx,
-                                         AgentMessage inventory,
-                                         AgentMessage pricing,
-                                         AgentMessage sentiment,
-                                         String rawSynthesis) {
-        List<String> actions      = List.of();
-        List<String> alerts       = List.of();
-        List<String> crossInsights = List.of();
-        String summary = rawSynthesis;
-
-        try {
-            // Single injected bean — no new ObjectMapper() inline
-            var node = objectMapper.readTree(rawSynthesis);
-            if (node.has("recommendedActions")) {
-                actions = List.of(objectMapper.treeToValue(node.get("recommendedActions"), String[].class));
-            }
-            if (node.has("urgentAlerts")) {
-                alerts = List.of(objectMapper.treeToValue(node.get("urgentAlerts"), String[].class));
-            }
-            if (node.has("crossInsights")) {
-                crossInsights = List.of(objectMapper.treeToValue(node.get("crossInsights"), String[].class));
-            }
-            if (node.has("executiveSummary")) {
-                summary = node.get("executiveSummary").asText();
-            }
-        } catch (Exception e) {
-            log.warn("Could not parse coordinator synthesis JSON: {}", e.getMessage());
+        public OrchestrationResult {
+            agentMessages = agentMessages == null ? List.of() : List.copyOf(agentMessages);
+            envelopes = envelopes == null ? List.of() : List.copyOf(envelopes);
+            report = report == null ? RuntimeRunReport.empty() : report;
         }
 
-        return DailyBriefing.builder()
-                .briefingId(UUID.randomUUID().toString())
-                .date(ctx.getDate())
-                .retailerId(ctx.getRetailerId())
-                .inventoryFindings(inventory.getContent())
-                .pricingFindings(pricing.getContent())
-                .sentimentFindings(sentiment.getContent())
-                .crossInsights(crossInsights)
-                .recommendedActions(actions)
-                .urgentAlerts(alerts)
-                .executiveSummary(summary)
-                .rawSynthesis(rawSynthesis)
-                .generatedAt(Instant.now())
-                .build();
+        public OrchestrationResult(DailyBriefing briefing, List<AgentMessage> agentMessages) {
+            this(briefing, agentMessages, List.of(), RuntimeRunReport.empty());
+        }
     }
 }

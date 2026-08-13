@@ -4,48 +4,78 @@ import com.azure.ai.openai.OpenAIClient;
 import com.azure.ai.openai.OpenAIClientBuilder;
 import com.azure.core.credential.AzureKeyCredential;
 import com.azure.core.credential.KeyCredential;
+import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 
+import java.time.Duration;
+import java.util.Locale;
+
 @Configuration
 @ConfigurationProperties(prefix = "llm")
-@Data
+@Getter
+@Setter
 public class LLMConfig {
 
     private String provider = "github-models";
     private String endpoint;
     private String apiKey;
     private String chatDeployment = "gpt-4o";
+    private Duration timeout = Duration.ofSeconds(30);
+    private int maxResponseCharacters = 32_768;
 
     private static final String GITHUB_MODELS_ENDPOINT = "https://models.inference.ai.azure.com";
 
     @Bean
     public OpenAIClient openAIClient() {
-        return switch (provider) {
+        String normalizedProvider = requireText(provider, "llm.provider")
+                .toLowerCase(Locale.ROOT)
+                .replace('_', '-');
+        if (timeout == null || timeout.isZero() || timeout.isNegative()) {
+            throw new IllegalStateException("llm.timeout must be positive");
+        }
+        if (maxResponseCharacters < 1) {
+            throw new IllegalStateException("llm.max-response-characters must be positive");
+        }
+
+        return switch (normalizedProvider) {
             case "azure-openai" -> new OpenAIClientBuilder()
-                    .endpoint(endpoint)
-                    .credential(new AzureKeyCredential(apiKey))
+                    .endpoint(requireText(endpoint, "llm.endpoint"))
+                    .credential(new AzureKeyCredential(requireText(apiKey, "llm.api-key")))
+                    .httpClient(httpClient())
                     .buildClient();
-            case "github-models" -> {
-                String token = System.getenv("GITHUB_TOKEN");
-                if (token == null || token.isBlank()) {
-                    throw new IllegalStateException(
-                            "GITHUB_TOKEN not set. Required for github-models provider.");
-                }
-                yield new OpenAIClientBuilder()
-                        .endpoint(GITHUB_MODELS_ENDPOINT)
-                        .credential(new KeyCredential(token))
-                        .buildClient();
-            }
-            default -> throw new IllegalArgumentException("Unknown llm.provider: " + provider);
+            case "github-models" -> new OpenAIClientBuilder()
+                    .endpoint(GITHUB_MODELS_ENDPOINT)
+                    .credential(new KeyCredential(requireText(apiKey, "llm.api-key")))
+                    .httpClient(httpClient())
+                    .buildClient();
+            default -> throw new IllegalArgumentException(
+                    "Unsupported llm.provider. Expected github-models or azure-openai.");
         };
+    }
+
+    private com.azure.core.http.HttpClient httpClient() {
+        return new NettyAsyncHttpClientBuilder()
+                .connectTimeout(timeout)
+                .readTimeout(timeout)
+                .responseTimeout(timeout)
+                .writeTimeout(timeout)
+                .build();
+    }
+
+    private static String requireText(String value, String property) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException(property + " must be configured");
+        }
+        return value;
     }
 
     /**

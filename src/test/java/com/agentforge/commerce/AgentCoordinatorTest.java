@@ -1,184 +1,164 @@
 package com.agentforge.commerce;
 
-import com.agentforge.commerce.agent.InventoryAgent;
-import com.agentforge.commerce.agent.PricingAgent;
-import com.agentforge.commerce.agent.SentimentAgent;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.verify;
+
 import com.agentforge.commerce.coordinator.AgentCoordinator;
+import com.agentforge.commerce.coordinator.AgentCoordinator.OrchestrationResult;
 import com.agentforge.commerce.model.AgentMessage;
 import com.agentforge.commerce.model.DailyAnalysisContext;
 import com.agentforge.commerce.model.DailyBriefing;
-import com.azure.ai.openai.OpenAIClient;
-import com.azure.ai.openai.models.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.agentforge.commerce.runtime.brakes.RunBrakes;
+import com.agentforge.commerce.runtime.budget.BudgetLedger;
+import com.agentforge.commerce.runtime.budget.RunBudget;
+import com.agentforge.commerce.runtime.contract.AgentResultEnvelope;
+import com.agentforge.commerce.runtime.contract.Confidence;
+import com.agentforge.commerce.runtime.contract.ResultStatus;
+import com.agentforge.commerce.runtime.contract.TokenUsage;
+import com.agentforge.commerce.runtime.engine.AgentRuntimeEngine;
+import com.agentforge.commerce.runtime.engine.AgentRuntimeEngine.SynthesisOutcome;
+import com.agentforge.commerce.runtime.engine.RuntimeRunContext;
+import com.agentforge.commerce.runtime.engine.SpecialistOutcome;
+import com.agentforge.commerce.runtime.memory.WorkingMemory;
+import com.agentforge.commerce.runtime.telemetry.RuntimeTelemetry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.List;
+import java.util.concurrent.Executor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
-import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.time.Instant;
-import java.time.LocalDate;
-import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executor;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.BDDMockito.given;
-import static org.mockito.Mockito.*;
-
 /**
- * Unit tests for AgentCoordinator.
+ * Unit tests for the engine-backed {@link AgentCoordinator}.
  *
- * Validates:
- * - All 3 specialist agents are invoked in parallel
- * - LLM synthesis call is made after all agents report
- * - A failing agent does NOT abort the whole analysis (safeAnalyse fallback)
- * - DailyBriefing is populated correctly from LLM JSON
+ * <p>Validates that the coordinator dispatches the three grounded specialists
+ * through the runtime engine, synthesises a briefing from their envelopes,
+ * assembles a full run report, and keeps running (degraded) when a single
+ * specialist fails.</p>
  */
 @ExtendWith(MockitoExtension.class)
-@DisplayName("AgentCoordinator — unit tests")
+@DisplayName("AgentCoordinator — engine orchestration")
 class AgentCoordinatorTest {
 
-    @Mock InventoryAgent inventoryAgent;
-    @Mock PricingAgent   pricingAgent;
-    @Mock SentimentAgent sentimentAgent;
-    @Mock OpenAIClient   openAIClient;
-    @Spy  ObjectMapper   objectMapper = new ObjectMapper();
-    // Synchronous stand-in for the "commerce-agent-" pool — runs supplyAsync tasks
-    // on the calling thread so tests stay deterministic. @Spy (rather than @Mock)
-    // so the real execute(Runnable) implementation below actually runs the task.
-    @Spy  Executor applicationTaskExecutor = Runnable::run;
+    private static final LocalDate DATE = LocalDate.of(2026, 6, 19);
+    private static final String RETAILER = "RETAILER-UK-001";
 
-    @InjectMocks
-    AgentCoordinator coordinator;
+    @Mock
+    AgentRuntimeEngine engine;
 
+    private final RuntimeTelemetry telemetry =
+            new RuntimeTelemetry(ObservationRegistry.create(), new SimpleMeterRegistry());
+    private final Executor synchronousExecutor = Runnable::run;
+
+    private AgentCoordinator coordinator;
+    private RuntimeRunContext ctx;
     private DailyAnalysisContext context;
 
     @BeforeEach
     void setUp() {
-        context = DailyAnalysisContext.builder()
-                .date(LocalDate.of(2026, 6, 19))
-                .retailerId("RETAILER-UK-001")
-                .build();
+        coordinator = new AgentCoordinator(engine, telemetry, synchronousExecutor);
+        ctx = new RuntimeRunContext("run-1", RETAILER, DATE, "github-models",
+                new BudgetLedger(new RunBudget(120_000, 24, Duration.ofMinutes(3), 500_000, 2_500, 10_000)),
+                new RunBrakes(32, 4, Instant.now().plusSeconds(120)), new WorkingMemory());
+        context = DailyAnalysisContext.builder().runId("run-1").date(DATE).retailerId(RETAILER).build();
+        given(engine.newContext(any(), any(), any())).willReturn(ctx);
     }
 
     @Test
-    @DisplayName("All 3 agents report → LLM synthesises → DailyBriefing returned")
-    void allAgentsSucceed_briefingReturned() throws ExecutionException, InterruptedException {
-        // given — all specialist agents return findings
-        given(inventoryAgent.analyse(context)).willReturn(agentMessage("InventoryAgent",
-                "{\"risks\":[\"6 critical SKUs\"],\"summary\":\"Restock urgently\"}"));
-        given(inventoryAgent.getName()).willReturn("InventoryAgent");
-        given(pricingAgent.analyse(context)).willReturn(agentMessage("PricingAgent",
-                "{\"opportunities\":[\"Competitor gap on SKU-009\"],\"summary\":\"3 pricing gaps found\"}"));
-        given(pricingAgent.getName()).willReturn("PricingAgent");
-        given(sentimentAgent.analyse(context)).willReturn(agentMessage("SentimentAgent",
-                "{\"nps\":72,\"topTheme\":\"Delivery speed\",\"summary\":\"Sentiment up 4 pts\"}"));
-        given(sentimentAgent.getName()).willReturn("SentimentAgent");
+    @DisplayName("All specialists report → synthesis → full orchestration result")
+    void allSpecialistsSucceed() {
+        given(engine.runInventory(ctx)).willReturn(outcome(AgentRuntimeEngine.INVENTORY_AGENT, 0.9));
+        given(engine.runPricing(ctx)).willReturn(outcome(AgentRuntimeEngine.PRICING_AGENT, 0.8));
+        given(engine.runSentiment(ctx)).willReturn(outcome(AgentRuntimeEngine.SENTIMENT_AGENT, 0.7));
+        given(engine.synthesise(any(), any(), any(), any())).willReturn(synthesis());
 
-        stubLlmSynthesis("""
-                {
-                  "crossInsights": ["Low stock + high NPS on fresh produce = restock before weekend"],
-                  "recommendedActions": ["Reorder SKU-0001 immediately", "Adjust pricing on SKU-009"],
-                  "urgentAlerts": ["6 SKUs under 7 days stock"],
-                  "executiveSummary": "Strong trading day with 6 critical stock alerts needing immediate action."
-                }
-                """);
+        OrchestrationResult result = coordinator.orchestrate(context, Duration.ofMinutes(2));
 
-        // when
-        CompletableFuture<DailyBriefing> future = coordinator.runDailyAnalysis(context);
-        DailyBriefing briefing = future.get();
-
-        // then
-        assertThat(briefing).isNotNull();
-        assertThat(briefing.getRecommendedActions()).hasSize(2);
-        assertThat(briefing.getUrgentAlerts()).hasSize(1);
-        assertThat(briefing.getExecutiveSummary()).contains("6 critical stock alerts");
-        assertThat(briefing.getBriefingId()).isNotBlank();
-        assertThat(briefing.getRetailerId()).isEqualTo("RETAILER-UK-001");
-
-        verify(inventoryAgent).analyse(context);
-        verify(pricingAgent).analyse(context);
-        verify(sentimentAgent).analyse(context);
-        verify(openAIClient).getChatCompletions(anyString(), any(ChatCompletionsOptions.class));
+        assertThat(result.briefing().getExecutiveSummary()).isEqualTo("All nominal");
+        assertThat(result.agentMessages()).hasSize(3);
+        assertThat(result.envelopes()).hasSize(4);
+        assertThat(result.report().specialists()).hasSize(3);
+        assertThat(result.report().coordinator()).isNotNull();
+        verify(engine).runInventory(ctx);
+        verify(engine).runPricing(ctx);
+        verify(engine).runSentiment(ctx);
+        verify(engine).synthesise(any(), any(), any(), any());
     }
 
     @Test
-    @DisplayName("One agent fails → analysis continues with remaining agents")
-    void oneAgentFails_analysisStillCompletes() throws ExecutionException, InterruptedException {
-        // given — inventory agent throws; others succeed
-        given(inventoryAgent.getName()).willReturn("InventoryAgent");
-        given(inventoryAgent.analyse(context))
-                .willThrow(new RuntimeException("WMS connection timeout"));
-        given(pricingAgent.analyse(context)).willReturn(agentMessage("PricingAgent", "Pricing OK"));
-        given(pricingAgent.getName()).willReturn("PricingAgent");
-        given(sentimentAgent.analyse(context)).willReturn(agentMessage("SentimentAgent", "Sentiment OK"));
-        given(sentimentAgent.getName()).willReturn("SentimentAgent");
+    @DisplayName("A failing specialist is replaced by a degraded outcome, run still completes")
+    void oneSpecialistFails() {
+        given(engine.runInventory(ctx)).willThrow(new IllegalStateException("WMS timeout"));
+        given(engine.runPricing(ctx)).willReturn(outcome(AgentRuntimeEngine.PRICING_AGENT, 0.8));
+        given(engine.runSentiment(ctx)).willReturn(outcome(AgentRuntimeEngine.SENTIMENT_AGENT, 0.7));
+        given(engine.degradedOutcome(eq(AgentRuntimeEngine.INVENTORY_AGENT), any()))
+                .willReturn(outcome(AgentRuntimeEngine.INVENTORY_AGENT, ResultStatus.DEGRADED, 0.0));
+        given(engine.synthesise(any(), any(), any(), any())).willReturn(synthesis());
 
-        stubLlmSynthesis("""
-                {
-                  "crossInsights": [],
-                  "recommendedActions": ["Check WMS connectivity"],
-                  "urgentAlerts": ["Inventory data unavailable"],
-                  "executiveSummary": "Partial analysis — inventory agent unavailable."
-                }
-                """);
+        OrchestrationResult result = coordinator.orchestrate(context, Duration.ofMinutes(2));
 
-        // when — must NOT throw despite inventory agent failure
-        CompletableFuture<DailyBriefing> future = coordinator.runDailyAnalysis(context);
-        DailyBriefing briefing = future.get();
-
-        // then
-        assertThat(briefing).isNotNull();
-        assertThat(briefing.getInventoryFindings()).contains("Agent unavailable");
-        assertThat(briefing.getRecommendedActions()).isNotEmpty();
+        assertThat(result.briefing()).isNotNull();
+        assertThat(result.report().specialists()).hasSize(3);
+        verify(engine).degradedOutcome(eq(AgentRuntimeEngine.INVENTORY_AGENT), any());
     }
 
     @Test
-    @DisplayName("Malformed synthesis JSON → briefing returned with raw content as summary")
-    void malformedSynthesisJson_fallsBackGracefully() throws ExecutionException, InterruptedException {
-        given(inventoryAgent.analyse(context)).willReturn(agentMessage("InventoryAgent", "OK"));
-        given(inventoryAgent.getName()).willReturn("InventoryAgent");
-        given(pricingAgent.analyse(context)).willReturn(agentMessage("PricingAgent", "OK"));
-        given(pricingAgent.getName()).willReturn("PricingAgent");
-        given(sentimentAgent.analyse(context)).willReturn(agentMessage("SentimentAgent", "OK"));
-        given(sentimentAgent.getName()).willReturn("SentimentAgent");
+    @DisplayName("Legacy runDailyAnalysis path returns the synthesised briefing")
+    void runDailyAnalysisReturnsBriefing() throws Exception {
+        given(engine.runInventory(ctx)).willReturn(outcome(AgentRuntimeEngine.INVENTORY_AGENT, 0.9));
+        given(engine.runPricing(ctx)).willReturn(outcome(AgentRuntimeEngine.PRICING_AGENT, 0.8));
+        given(engine.runSentiment(ctx)).willReturn(outcome(AgentRuntimeEngine.SENTIMENT_AGENT, 0.7));
+        given(engine.synthesise(any(), any(), any(), any())).willReturn(synthesis());
 
-        stubLlmSynthesis("This is not JSON — the LLM returned prose instead.");
+        DailyBriefing briefing = coordinator.runDailyAnalysis(context).get();
 
-        // when — must NOT throw
-        CompletableFuture<DailyBriefing> future = coordinator.runDailyAnalysis(context);
-        DailyBriefing briefing = future.get();
-
-        assertThat(briefing).isNotNull();
-        assertThat(briefing.getExecutiveSummary()).isNotBlank();
-        assertThat(briefing.getGeneratedAt()).isNotNull();
+        assertThat(briefing.getRetailerId()).isEqualTo(RETAILER);
+        assertThat(briefing.getRecommendedActions()).containsExactly("Reorder SKU-1");
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
+    private SpecialistOutcome outcome(String agent, double confidence) {
+        return outcome(agent, ResultStatus.OK, confidence);
+    }
 
-    private AgentMessage agentMessage(String agent, String content) {
-        return AgentMessage.builder()
+    private SpecialistOutcome outcome(String agent, ResultStatus status, double confidence) {
+        AgentResultEnvelope envelope = new AgentResultEnvelope(agent, status, "id", "hash",
+                "github-models", "gpt-4o", "{}", List.of(), new Confidence(confidence, "r"),
+                TokenUsage.ZERO, 5, true, List.of());
+        AgentMessage message = AgentMessage.builder()
                 .agentName(agent)
                 .messageType(AgentMessage.MessageType.FINDINGS)
-                .content(content)
+                .priority(AgentMessage.AgentMessagePriority.NORMAL)
+                .content("{}")
                 .timestamp(Instant.now())
                 .build();
+        return new SpecialistOutcome(envelope, message);
     }
 
-    private void stubLlmSynthesis(String jsonResponse) {
-        ChatResponseMessage msg = mock(ChatResponseMessage.class);
-        given(msg.getContent()).willReturn(jsonResponse);
-        ChatChoice choice = mock(ChatChoice.class);
-        given(choice.getMessage()).willReturn(msg);
-        ChatCompletions completions = mock(ChatCompletions.class);
-        given(completions.getChoices()).willReturn(List.of(choice));
-        given(openAIClient.getChatCompletions(anyString(), any(ChatCompletionsOptions.class)))
-                .willReturn(completions);
+    private SynthesisOutcome synthesis() {
+        DailyBriefing briefing = DailyBriefing.builder()
+                .briefingId("b-1")
+                .date(DATE)
+                .retailerId(RETAILER)
+                .crossInsights(List.of("Insight"))
+                .recommendedActions(List.of("Reorder SKU-1"))
+                .urgentAlerts(List.of())
+                .executiveSummary("All nominal")
+                .rawSynthesis("{}")
+                .generatedAt(Instant.now())
+                .build();
+        AgentResultEnvelope envelope = new AgentResultEnvelope(AgentRuntimeEngine.COORDINATOR_AGENT,
+                ResultStatus.OK, "id", "hash", "github-models", "gpt-4o", "{}", List.of(),
+                new Confidence(0.7, "r"), TokenUsage.ZERO, 5, true, List.of());
+        return new SynthesisOutcome(briefing, envelope, ResultStatus.OK);
     }
 }
