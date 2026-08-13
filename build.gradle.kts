@@ -40,7 +40,7 @@ extra["commons-lang3.version"] = "3.20.0"
 extra["netty.version"] = "4.1.136.Final"      // CVE-2026-55831/55833/56745/56819/59901
 extra["postgresql.version"] = "42.7.12"        // CVE-2026-54291
 
-val testcontainersVersion = "1.20.6"
+val testcontainersVersion = "1.21.4"
 val wiremockVersion = "3.9.2"
 
 dependencies {
