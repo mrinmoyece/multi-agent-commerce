@@ -71,6 +71,35 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+  # Opt-in local identity provider. Enabled ONLY with `--profile local-auth`.
+  # DEVELOPMENT-ONLY: imports a committed dev realm, publishes on loopback, and
+  # never alters the production default (bring-your-own real issuer) path.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858
+    profiles: ["local-auth"]
+    command: ["start-dev", "--import-realm"]
+    environment:
+      # Admin bootstrap creds. Overridable via .env; the default is an obvious
+      # non-production placeholder. NOTE: a single-file Compose profile still
+      # interpolates these variables when the profile is inactive, so a hard
+      # `${VAR:?}` requirement here would break the default (bring-your-own-issuer)
+      # `docker compose up`. The real client-credentials secret lives in the
+      # committed dev realm, not here — the admin account is only for the console.
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-local-dev-admin-not-for-production}
+      # Pin the issuer to the in-network URL so the token `iss` is identical
+      # whether the app (via compose DNS `keycloak:8080`) or a developer (via the
+      # published loopback port) obtains it. This is what makes issuer discovery
+      # and signature validation actually work from inside the app container.
+      KC_HOSTNAME: http://keycloak:8080
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:8082:8080"
+    volumes:
+      - ./keycloak/realms:/opt/keycloak/data/import:ro
+    security_opt:
+      - no-new-privileges:true
   prometheus:
     image: prom/prometheus:v3.7.3@sha256:6573196e5dbe834779ac4d34cb053113cc502a69e9e20ba3be96d37f33e81545
     ports:

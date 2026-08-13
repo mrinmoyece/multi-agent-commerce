@@ -49,3 +49,12 @@
 The provider remains a trusted processor. Model output is nondeterministic. An
 append-only audit trail is now retained, but briefing content is not
 cryptographically signed. See [LIMITATIONS.md](LIMITATIONS.md).
+
+The opt-in `local-auth` Docker Compose profile ships a **development-only**
+Keycloak realm import with a clearly-labelled placeholder client secret. It is
+confined to that profile, publishes its admin port on loopback only, and issues
+tokens whose issuer/audience/scopes match the resource server so JWT verification
+stays fully enabled — it introduces **no** static auth bypass and changes **no**
+production defaults. The committed values are unusable outside a local machine and
+must never be reused in a deployed environment. See
+[LOCAL_DEVELOPMENT.md](LOCAL_DEVELOPMENT.md#self-contained-local-oidc-opt-in-local-auth-profile).

@@ -162,7 +162,11 @@ digest. See the [ADRs](docs/adr/README.md), [governance](docs/governance/README.
 > **New to the project?** The [Local development guide](docs/LOCAL_DEVELOPMENT.md)
 > is the canonical, end-to-end walkthrough: prerequisites, `.env` setup, `docker
 > compose up --build`, readiness checks, obtaining a bearer JWT, and triggering a
-> run with copy-pasteable (sanitized) `curl` examples.
+> run with copy-pasteable (sanitized) `curl` examples. No OIDC issuer of your own?
+> The opt-in [`local-auth` Compose profile](docs/LOCAL_DEVELOPMENT.md#self-contained-local-oidc-opt-in-local-auth-profile)
+> spins up a development-only Keycloak (loopback-only) that issues client-credentials
+> tokens for API testing — without disabling JWT verification or changing production
+> defaults.
 
 This is a Gradle project (no Maven). The Gradle wrapper is included, so you don't need Gradle installed locally.
 

@@ -107,7 +107,106 @@ Metrics are at `http://127.0.0.1:8081/actuator/prometheus` (used by the bundled
 Prometheus). The application port `8080` serves only the secured API — calling it
 without a valid token returns `401`.
 
+## Self-contained local OIDC (opt-in `local-auth` profile)
+
+If you don't already own an OIDC issuer, the opt-in `local-auth` Compose profile
+runs a self-contained **Keycloak** so you can get a real, correctly-scoped bearer
+token locally. It is **development-only**: published on loopback, gated behind an
+explicit profile, and adds **no** auth bypass — the app still fully validates
+issuer, signature, audience, and scopes. It never changes the default
+bring-your-own-issuer path.
+
+> Why the issuer is `http://keycloak:8080` and not `http://localhost:8082`: the
+> app validates and fetches signing keys from the issuer URL, and it runs inside
+> the Compose network where the identity provider is reachable as `keycloak:8080`.
+> Keycloak is configured to **pin** that URL as the token issuer, so a token's
+> `iss` is identical whether the app (in-network) or you (via the published
+> loopback port `8082`) obtained it. That is what makes discovery and signature
+> validation actually work from inside the app container.
+
+**1. Point `.env` at the local issuer** (the audience is unchanged):
+
+```bash
+OAUTH2_ISSUER_URI=http://keycloak:8080/realms/commerce-local
+OAUTH2_AUDIENCE=api://multi-agent-commerce
+# Optional: override the local Keycloak admin password (console only; not needed
+# for the token flow). A clearly-non-production default is used if unset.
+# KEYCLOAK_ADMIN_PASSWORD=some-local-value
+```
+
+**2. Start Keycloak first and wait for the dev realm to import** (published on
+`127.0.0.1:8082`):
+
+```bash
+docker compose --profile local-auth up -d keycloak
+
+# Wait until OIDC discovery for the realm responds:
+until curl -fsS http://localhost:8082/realms/commerce-local/.well-known/openid-configuration >/dev/null 2>&1; do
+  echo "waiting for keycloak..."; sleep 2;
+done
+```
+
+**3. Start the platform** (Keycloak stays up; keep the profile flag so it is not
+stopped):
+
+```bash
+docker compose --profile local-auth up -d --build
+curl -fsS http://127.0.0.1:8081/actuator/health/readiness    # {"status":"UP"}
+```
+
+**4. Obtain a token** via the client-credentials grant. The committed dev client
+`commerce-local-client` is least-privilege: it is granted exactly `runs:read`,
+`runs:write`, `approvals:write` and the API audience — nothing else. Its secret is
+a well-known development placeholder (loopback + opt-in only, never a production
+credential):
+
+```bash
+export TOKEN=$(curl -fsS -X POST \
+  http://localhost:8082/realms/commerce-local/protocol/openid-connect/token \
+  -d grant_type=client_credentials \
+  -d client_id=commerce-local-client \
+  -d client_secret=local-dev-only-not-a-real-secret \
+  | jq -r .access_token)
+```
+
+**5. Decode and sanity-check `iss` / `aud` / `scope`** before using it:
+
+```bash
+# jq (base64url-safe):
+echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq '{iss, aud, scope, azp}'
+
+# …or, fully portable, with python3:
+echo "$TOKEN" | python3 -c 'import sys,base64,json; p=sys.stdin.read().strip().split(".")[1]; p+="="*(-len(p)%4); c=json.loads(base64.urlsafe_b64decode(p)); print("iss  :",c["iss"]); print("aud  :",c["aud"]); print("scope:",c["scope"])'
+```
+
+Expected (scope order may vary):
+
+```text
+iss  : http://keycloak:8080/realms/commerce-local
+aud  : api://multi-agent-commerce
+scope: runs:read runs:write approvals:write
+```
+
+**6. Call the API** with the token (see the next sections for the full request/
+response shapes):
+
+```bash
+curl -fsS -X POST http://localhost:8080/api/v1/analysis-runs \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"retailerId":"default-retailer"}'
+```
+
+To stop just the identity provider later: `docker compose --profile local-auth stop keycloak`.
+The Keycloak instance is stateless (the realm is re-imported on each start), so no
+volume is kept for it.
+
 ## 4. Obtain a bearer JWT
+
+> **No OIDC issuer of your own?** Use the built-in
+> [self-contained local OIDC option](#self-contained-local-oidc-opt-in-local-auth-profile)
+> below — it hands you a working token in a few commands. The steps here describe
+> the general (bring-your-own-issuer) case.
 
 The API accepts a standard OAuth2 bearer token from your configured issuer. Mint a
 token however your identity provider supports (for local dev this is typically a
