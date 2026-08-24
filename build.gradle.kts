@@ -74,7 +74,7 @@ dependencies {
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
     // logstash-logback-encoder 9.x pulls Jackson 3.x (tools.jackson); pin the
     // Jackson 3 BOM to a patched release (CVE-2026-29062/54512/54513, GHSA-r7wm-3cxj-wff9).
-    implementation(platform("tools.jackson:jackson-bom:3.1.4"))
+    implementation(platform("tools.jackson:jackson-bom:3.2.2"))
     implementation("net.logstash.logback:logstash-logback-encoder:9.0")
     implementation("io.micrometer:micrometer-registry-prometheus")
 
